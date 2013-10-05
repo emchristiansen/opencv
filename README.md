@@ -1,5 +1,7 @@
 ### OpenCV: Open Source Computer Vision Library
 
+[![Build Status](https://travis-ci.org/emchristiansen/opencv.png)](https://travis-ci.org/emchristiansen/opencv)
+
 #### Resources
 
 * Homepage: <http://opencv.org>
