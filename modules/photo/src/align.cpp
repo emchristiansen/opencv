@@ -47,7 +47,7 @@
 namespace cv
 {
 
-class AlignMTBImpl : public AlignMTB
+class AlignMTBImpl CV_FINAL : public AlignMTB
 {
 public:
     AlignMTBImpl(int _max_bits, int _exclude_range, bool _cut) :
@@ -59,13 +59,17 @@ public:
     }
 
     void process(InputArrayOfArrays src, std::vector<Mat>& dst,
-                 InputArray, InputArray)
+                 InputArray, InputArray) CV_OVERRIDE
     {
+        CV_INSTRUMENT_REGION();
+
         process(src, dst);
     }
 
-    void process(InputArrayOfArrays _src, std::vector<Mat>& dst)
+    void process(InputArrayOfArrays _src, std::vector<Mat>& dst) CV_OVERRIDE
     {
+        CV_INSTRUMENT_REGION();
+
         std::vector<Mat> src;
         _src.getMatVector(src);
 
@@ -112,12 +116,14 @@ public:
         }
     }
 
-    Point calculateShift(InputArray _img0, InputArray _img1)
+    Point calculateShift(InputArray _img0, InputArray _img1) CV_OVERRIDE
     {
+        CV_INSTRUMENT_REGION();
+
         Mat img0 = _img0.getMat();
         Mat img1 = _img1.getMat();
         CV_Assert(img0.channels() == 1 && img0.type() == img1.type());
-        CV_Assert(img0.size() == img0.size());
+        CV_Assert(img0.size() == img1.size());
 
         int maxlevel = static_cast<int>(log((double)max(img0.rows, img0.cols)) / log(2.0)) - 1;
         maxlevel = min(maxlevel, max_bits - 1);
@@ -135,7 +141,7 @@ public:
             computeBitmaps(pyr0[level], tb1, eb1);
             computeBitmaps(pyr1[level], tb2, eb2);
 
-            int min_err = pyr0[level].total();
+            int min_err = (int)pyr0[level].total();
             Point new_shift(shift);
             for(int i = -1; i <= 1; i++) {
                 for(int j = -1; j <= 1; j++) {
@@ -158,8 +164,10 @@ public:
         return shift;
     }
 
-    void shiftMat(InputArray _src, OutputArray _dst, const Point shift)
+    void shiftMat(InputArray _src, OutputArray _dst, const Point shift) CV_OVERRIDE
     {
+        CV_INSTRUMENT_REGION();
+
         Mat src = _src.getMat();
         _dst.create(src.size(), src.type());
         Mat dst = _dst.getMat();
@@ -173,24 +181,25 @@ public:
         res.copyTo(dst);
     }
 
-    int getMaxBits() const { return max_bits; }
-    void setMaxBits(int val) { max_bits = val; }
+    int getMaxBits() const CV_OVERRIDE { return max_bits; }
+    void setMaxBits(int val) CV_OVERRIDE { max_bits = val; }
 
-    int getExcludeRange() const { return exclude_range; }
-    void setExcludeRange(int val) { exclude_range = val; }
+    int getExcludeRange() const CV_OVERRIDE { return exclude_range; }
+    void setExcludeRange(int val) CV_OVERRIDE { exclude_range = val; }
 
-    bool getCut() const { return cut; }
-    void setCut(bool val) { cut = val; }
+    bool getCut() const CV_OVERRIDE { return cut; }
+    void setCut(bool val) CV_OVERRIDE { cut = val; }
 
-    void write(FileStorage& fs) const
+    void write(FileStorage& fs) const CV_OVERRIDE
     {
+        writeFormat(fs);
         fs << "name" << name
            << "max_bits" << max_bits
            << "exclude_range" << exclude_range
            << "cut" << static_cast<int>(cut);
     }
 
-    void read(const FileNode& fn)
+    void read(const FileNode& fn) CV_OVERRIDE
     {
         FileNode n = fn["name"];
         CV_Assert(n.isString() && String(n) == name);
@@ -200,8 +209,10 @@ public:
         cut = (cut_val != 0);
     }
 
-    void computeBitmaps(InputArray _img, OutputArray _tb, OutputArray _eb)
+    void computeBitmaps(InputArray _img, OutputArray _tb, OutputArray _eb) CV_OVERRIDE
     {
+        CV_INSTRUMENT_REGION();
+
         Mat img = _img.getMat();
         _tb.create(img.size(), CV_8U);
         _eb.create(img.size(), CV_8U);
@@ -253,7 +264,7 @@ protected:
         calcHist(&img, 1, &channels, Mat(), hist, 1, &hist_size, ranges);
         float *ptr = hist.ptr<float>();
         int median = 0, sum = 0;
-        int thresh = img.total() / 2;
+        int thresh = (int)img.total() / 2;
         while(sum < thresh && median < LDR_SIZE) {
             sum += static_cast<int>(ptr[median]);
             median++;

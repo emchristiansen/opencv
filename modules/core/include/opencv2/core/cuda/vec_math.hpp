@@ -40,14 +40,23 @@
 //
 //M*/
 
-#ifndef __OPENCV_CUDA_VECMATH_HPP__
-#define __OPENCV_CUDA_VECMATH_HPP__
+#ifndef OPENCV_CUDA_VECMATH_HPP
+#define OPENCV_CUDA_VECMATH_HPP
 
 #include "vec_traits.hpp"
 #include "saturate_cast.hpp"
+#include "cuda_compat.hpp"
+
+/** @file
+ * @deprecated Use @ref cudev instead.
+ */
+
+//! @cond IGNORED
 
 namespace cv { namespace cuda { namespace device
 {
+    using cv::cuda::device::compat::double4;
+    using cv::cuda::device::compat::make_double4;
 
 // saturate_cast
 
@@ -193,14 +202,7 @@ CV_CUDEV_IMPLEMENT_VEC_UNARY_OP(~, uint, uint)
         return VecTraits<output_type ## 4>::make(func (a.x), func (a.y), func (a.z), func (a.w)); \
     }
 
-CV_CUDEV_IMPLEMENT_VEC_UNARY_FUNC(abs, /*::abs*/, uchar, uchar)
-CV_CUDEV_IMPLEMENT_VEC_UNARY_FUNC(abs, ::abs, char, char)
-CV_CUDEV_IMPLEMENT_VEC_UNARY_FUNC(abs, /*::abs*/, ushort, ushort)
-CV_CUDEV_IMPLEMENT_VEC_UNARY_FUNC(abs, ::abs, short, short)
-CV_CUDEV_IMPLEMENT_VEC_UNARY_FUNC(abs, ::abs, int, int)
-CV_CUDEV_IMPLEMENT_VEC_UNARY_FUNC(abs, /*::abs*/, uint, uint)
 CV_CUDEV_IMPLEMENT_VEC_UNARY_FUNC(abs, ::fabsf, float, float)
-CV_CUDEV_IMPLEMENT_VEC_UNARY_FUNC(abs, ::fabs, double, double)
 
 CV_CUDEV_IMPLEMENT_VEC_UNARY_FUNC(sqrt, ::sqrtf, uchar, float)
 CV_CUDEV_IMPLEMENT_VEC_UNARY_FUNC(sqrt, ::sqrtf, char, float)
@@ -919,4 +921,6 @@ CV_CUDEV_IMPLEMENT_SCALAR_BINARY_FUNC(atan2, ::atan2, double, double, double)
 
 }}} // namespace cv { namespace cuda { namespace device
 
-#endif // __OPENCV_CUDA_VECMATH_HPP__
+//! @endcond
+
+#endif // OPENCV_CUDA_VECMATH_HPP

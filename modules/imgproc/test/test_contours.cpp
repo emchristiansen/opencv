@@ -40,354 +40,184 @@
 //M*/
 
 #include "test_precomp.hpp"
+#include <opencv2/highgui.hpp>
 
-using namespace cv;
-using namespace std;
+namespace opencv_test { namespace {
 
-class CV_FindContourTest : public cvtest::BaseTest
+//rotate/flip a quadrant appropriately
+static void rot(int n, int *x, int *y, int rx, int ry)
 {
-public:
-    enum { NUM_IMG = 4 };
-
-    CV_FindContourTest();
-    ~CV_FindContourTest();
-    void clear();
-
-protected:
-    int read_params( CvFileStorage* fs );
-    int prepare_test_case( int test_case_idx );
-    int validate_test_results( int test_case_idx );
-    void run_func();
-
-    int min_blob_size, max_blob_size;
-    int blob_count, max_log_blob_count;
-    int retr_mode, approx_method;
-
-    int min_log_img_size, max_log_img_size;
-    CvSize img_size;
-    int count, count2;
-
-    IplImage* img[NUM_IMG];
-    CvMemStorage* storage;
-    CvSeq *contours, *contours2, *chain;
-};
-
-
-CV_FindContourTest::CV_FindContourTest()
-{
-    int i;
-
-    test_case_count    = 300;
-    min_blob_size      = 1;
-    max_blob_size      = 50;
-    max_log_blob_count = 10;
-
-    min_log_img_size   = 3;
-    max_log_img_size   = 10;
-
-    for( i = 0; i < NUM_IMG; i++ )
-        img[i] = 0;
-
-    storage = 0;
-}
-
-
-CV_FindContourTest::~CV_FindContourTest()
-{
-    clear();
-}
-
-
-void CV_FindContourTest::clear()
-{
-    int i;
-
-    cvtest::BaseTest::clear();
-
-    for( i = 0; i < NUM_IMG; i++ )
-        cvReleaseImage( &img[i] );
-
-    cvReleaseMemStorage( &storage );
-}
-
-
-int CV_FindContourTest::read_params( CvFileStorage* fs )
-{
-    int t;
-    int code = cvtest::BaseTest::read_params( fs );
-
-    if( code < 0 )
-        return code;
-
-    min_blob_size      = cvReadInt( find_param( fs, "min_blob_size" ), min_blob_size );
-    max_blob_size      = cvReadInt( find_param( fs, "max_blob_size" ), max_blob_size );
-    max_log_blob_count = cvReadInt( find_param( fs, "max_log_blob_count" ), max_log_blob_count );
-    min_log_img_size   = cvReadInt( find_param( fs, "min_log_img_size" ), min_log_img_size );
-    max_log_img_size   = cvReadInt( find_param( fs, "max_log_img_size" ), max_log_img_size );
-
-    min_blob_size = cvtest::clipInt( min_blob_size, 1, 100 );
-    max_blob_size = cvtest::clipInt( max_blob_size, 1, 100 );
-
-    if( min_blob_size > max_blob_size )
-        CV_SWAP( min_blob_size, max_blob_size, t );
-
-    max_log_blob_count = cvtest::clipInt( max_log_blob_count, 1, 10 );
-
-    min_log_img_size = cvtest::clipInt( min_log_img_size, 1, 10 );
-    max_log_img_size = cvtest::clipInt( max_log_img_size, 1, 10 );
-
-    if( min_log_img_size > max_log_img_size )
-        CV_SWAP( min_log_img_size, max_log_img_size, t );
-
-    return 0;
-}
-
-
-static void
-cvTsGenerateBlobImage( IplImage* img, int min_blob_size, int max_blob_size,
-                       int blob_count, int min_brightness, int max_brightness,
-                       RNG& rng )
-{
-    int i;
-    CvSize size;
-
-    assert( img->depth == IPL_DEPTH_8U && img->nChannels == 1 );
-
-    cvZero( img );
-
-    // keep the border clear
-    cvSetImageROI( img, cvRect(1,1,img->width-2,img->height-2) );
-    size = cvGetSize( img );
-
-    for( i = 0; i < blob_count; i++ )
-    {
-        CvPoint center;
-        CvSize  axes;
-        int angle = cvtest::randInt(rng) % 180;
-        int brightness = cvtest::randInt(rng) %
-                         (max_brightness - min_brightness) + min_brightness;
-        center.x = cvtest::randInt(rng) % size.width;
-        center.y = cvtest::randInt(rng) % size.height;
-
-        axes.width = (cvtest::randInt(rng) %
-                     (max_blob_size - min_blob_size) + min_blob_size + 1)/2;
-        axes.height = (cvtest::randInt(rng) %
-                      (max_blob_size - min_blob_size) + min_blob_size + 1)/2;
-
-        cvEllipse( img, center, axes, angle, 0, 360, cvScalar(brightness), CV_FILLED );
-    }
-
-    cvResetImageROI( img );
-}
-
-
-static void
-cvTsMarkContours( IplImage* img, int val )
-{
-    int i, j;
-    int step = img->widthStep;
-
-    assert( img->depth == IPL_DEPTH_8U && img->nChannels == 1 && (val&1) != 0);
-
-    for( i = 1; i < img->height - 1; i++ )
-        for( j = 1; j < img->width - 1; j++ )
-        {
-            uchar* t = (uchar*)(img->imageData + img->widthStep*i + j);
-            if( *t == 1 && (t[-step] == 0 || t[-1] == 0 || t[1] == 0 || t[step] == 0))
-                *t = (uchar)val;
+    if (ry == 0) {
+        if (rx == 1) {
+            *x = n-1 - *x;
+            *y = n-1 - *y;
         }
 
-    cvThreshold( img, img, val - 2, val, CV_THRESH_BINARY );
+        //Swap x and y
+        int t  = *x;
+        *x = *y;
+        *y = t;
+    }
 }
 
-
-int CV_FindContourTest::prepare_test_case( int test_case_idx )
+static void d2xy(int n, int d, int *x, int *y)
 {
-    RNG& rng = ts->get_rng();
-    const int  min_brightness = 0, max_brightness = 2;
-    int i, code = cvtest::BaseTest::prepare_test_case( test_case_idx );
-
-    if( code < 0 )
-        return code;
-
-    clear();
-
-    blob_count = cvRound(exp(cvtest::randReal(rng)*max_log_blob_count*CV_LOG2));
-
-    img_size.width = cvRound(exp((cvtest::randReal(rng)*
-        (max_log_img_size - min_log_img_size) + min_log_img_size)*CV_LOG2));
-    img_size.height = cvRound(exp((cvtest::randReal(rng)*
-        (max_log_img_size - min_log_img_size) + min_log_img_size)*CV_LOG2));
-
-    approx_method = cvtest::randInt( rng ) % 4 + 1;
-    retr_mode = cvtest::randInt( rng ) % 4;
-
-    storage = cvCreateMemStorage( 1 << 10 );
-
-    for( i = 0; i < NUM_IMG; i++ )
-        img[i] = cvCreateImage( img_size, 8, 1 );
-
-    cvTsGenerateBlobImage( img[0], min_blob_size, max_blob_size,
-        blob_count, min_brightness, max_brightness, rng );
-
-    cvCopy( img[0], img[1] );
-    cvCopy( img[0], img[2] );
-
-    cvTsMarkContours( img[1], 255 );
-
-    return 1;
-}
-
-
-void CV_FindContourTest::run_func()
-{
-    contours = contours2 = chain = 0;
-    count = cvFindContours( img[2], storage, &contours, sizeof(CvContour), retr_mode, approx_method );
-
-    cvZero( img[3] );
-
-    if( contours && retr_mode != CV_RETR_EXTERNAL && approx_method < CV_CHAIN_APPROX_TC89_L1 )
-        cvDrawContours( img[3], contours, cvScalar(255), cvScalar(255), INT_MAX, -1 );
-
-    cvCopy( img[0], img[2] );
-
-    count2 = cvFindContours( img[2], storage, &chain, sizeof(CvChain), retr_mode, CV_CHAIN_CODE );
-
-    if( chain )
-        contours2 = cvApproxChains( chain, storage, approx_method, 0, 0, 1 );
-
-    cvZero( img[2] );
-
-    if( contours && retr_mode != CV_RETR_EXTERNAL && approx_method < CV_CHAIN_APPROX_TC89_L1 )
-        cvDrawContours( img[2], contours2, cvScalar(255), cvScalar(255), INT_MAX );
-}
-
-
-// the whole testing is done here, run_func() is not utilized in this test
-int CV_FindContourTest::validate_test_results( int /*test_case_idx*/ )
-{
-    int code = cvtest::TS::OK;
-
-    cvCmpS( img[0], 0, img[0], CV_CMP_GT );
-
-    if( count != count2 )
+    int rx, ry, s, t=d;
+    *x = *y = 0;
+    for (s=1; s<n; s*=2)
     {
-        ts->printf( cvtest::TS::LOG, "The number of contours retrieved with different "
-            "approximation methods is not the same\n"
-            "(%d contour(s) for method %d vs %d contour(s) for method %d)\n",
-            count, approx_method, count2, CV_CHAIN_CODE );
-        code = cvtest::TS::FAIL_INVALID_OUTPUT;
+        rx = 1 & (t/2);
+        ry = 1 & (t ^ rx);
+        rot(s, x, y, rx, ry);
+        *x += s * rx;
+        *y += s * ry;
+        t /= 4;
+    }
+}
+
+static Mat draw_hilbert(int n = 64, int scale = 10)
+{
+    int n2 = n*n, w = (n + 2)*scale;
+    Point ofs(scale, scale);
+    Mat img(w, w, CV_8U);
+    img.setTo(Scalar::all(0));
+
+    Point p(0,0);
+    for( int i = 0; i < n2; i++ )
+    {
+        Point q(0,0);
+        d2xy(n2, i, &q.x, &q.y);
+        line(img, p*scale + ofs, q*scale + ofs, Scalar::all(255));
+        p = q;
+    }
+    dilate(img, img, Mat());
+    return img;
+}
+
+TEST(Imgproc_FindContours, hilbert)
+{
+    Mat img = draw_hilbert();
+    vector<vector<Point> > contours;
+
+    findContours(img, contours, noArray(), RETR_LIST, CHAIN_APPROX_NONE);
+    ASSERT_EQ(1, (int)contours.size());
+    ASSERT_EQ(78632, (int)contours[0].size());
+
+    findContours(img, contours, noArray(), RETR_LIST, CHAIN_APPROX_SIMPLE);
+    ASSERT_EQ(1, (int)contours.size());
+    ASSERT_EQ(9832, (int)contours[0].size());
+}
+
+TEST(Imgproc_FindContours, border)
+{
+    Mat img;
+    cv::copyMakeBorder(Mat::zeros(8, 10, CV_8U), img, 1, 1, 1, 1, BORDER_CONSTANT, Scalar(1));
+
+    std::vector<std::vector<cv::Point> > contours;
+    findContours(img, contours, RETR_LIST, CHAIN_APPROX_NONE);
+
+    Mat img_draw_contours = Mat::zeros(img.size(), CV_8U);
+    for (size_t cpt = 0; cpt < contours.size(); cpt++)
+    {
+      drawContours(img_draw_contours, contours, static_cast<int>(cpt), cv::Scalar(1));
     }
 
-    if( retr_mode != CV_RETR_EXTERNAL && approx_method < CV_CHAIN_APPROX_TC89_L1 )
-    {
-        Mat _img[4];
-        for( int i = 0; i < 4; i++ )
-            _img[i] = cvarrToMat(img[i]);
+    ASSERT_EQ(0, cvtest::norm(img, img_draw_contours, NORM_INF));
+}
 
-        code = cvtest::cmpEps2(ts, _img[0], _img[3], 0, true, "Comparing original image with the map of filled contours" );
+TEST(Imgproc_FindContours, regression_4363_shared_nbd)
+{
+    // Create specific test image
+    Mat1b img(12, 69, (const uchar&)0);
 
-        if( code < 0 )
-            goto _exit_;
+    img(1, 1) = 1;
 
-        code = cvtest::cmpEps2( ts, _img[1], _img[2], 0, true,
-            "Comparing contour outline vs manually produced edge map" );
-
-        if( code < 0 )
-            goto _exit_;
-    }
-
-    if( contours )
-    {
-        CvTreeNodeIterator iterator1;
-        CvTreeNodeIterator iterator2;
-        int count3;
-
-        for(int i = 0; i < 2; i++ )
-        {
-            CvTreeNodeIterator iterator;
-            cvInitTreeNodeIterator( &iterator, i == 0 ? contours : contours2, INT_MAX );
-
-            for( count3 = 0; cvNextTreeNode( &iterator ) != 0; count3++ )
-                ;
-
-            if( count3 != count )
-            {
-                ts->printf( cvtest::TS::LOG,
-                    "The returned number of retrieved contours (using the approx_method = %d) does not match\n"
-                    "to the actual number of contours in the tree/list (returned %d, actual %d)\n",
-                    i == 0 ? approx_method : 0, count, count3 );
-                code = cvtest::TS::FAIL_INVALID_OUTPUT;
-                goto _exit_;
-            }
+    // Vertical rectangle with hole sharing the same NBD
+    for (int r = 1; r <= 10; ++r) {
+        for (int c = 3; c <= 5; ++c) {
+            img(r, c) = 1;
         }
+    }
+    img(9, 4) = 0;
 
-        cvInitTreeNodeIterator( &iterator1, contours, INT_MAX );
-        cvInitTreeNodeIterator( &iterator2, contours2, INT_MAX );
-
-        for( count3 = 0; count3 < count; count3++ )
-        {
-            CvSeq* seq1 = (CvSeq*)cvNextTreeNode( &iterator1 );
-            CvSeq* seq2 = (CvSeq*)cvNextTreeNode( &iterator2 );
-            CvSeqReader reader1;
-            CvSeqReader reader2;
-
-            if( !seq1 || !seq2 )
-            {
-                ts->printf( cvtest::TS::LOG,
-                    "There are NULL pointers in the original contour tree or the "
-                    "tree produced by cvApproxChains\n" );
-                code = cvtest::TS::FAIL_INVALID_OUTPUT;
-                goto _exit_;
-            }
-
-            cvStartReadSeq( seq1, &reader1 );
-            cvStartReadSeq( seq2, &reader2 );
-
-            if( seq1->total != seq2->total )
-            {
-                ts->printf( cvtest::TS::LOG,
-                    "The original contour #%d has %d points, while the corresponding contour has %d point\n",
-                    count3, seq1->total, seq2->total );
-                code = cvtest::TS::FAIL_INVALID_OUTPUT;
-                goto _exit_;
-            }
-
-            for(int i = 0; i < seq1->total; i++ )
-            {
-                CvPoint pt1;
-                CvPoint pt2;
-
-                CV_READ_SEQ_ELEM( pt1, reader1 );
-                CV_READ_SEQ_ELEM( pt2, reader2 );
-
-                if( pt1.x != pt2.x || pt1.y != pt2.y )
-                {
-                    ts->printf( cvtest::TS::LOG,
-                    "The point #%d in the contour #%d is different from the corresponding point "
-                    "in the approximated chain ((%d,%d) vs (%d,%d)", count3, i, pt1.x, pt1.y, pt2.x, pt2.y );
-                    code = cvtest::TS::FAIL_INVALID_OUTPUT;
-                    goto _exit_;
-                }
-            }
+    // 124 small CCs
+    for (int r = 1; r <= 7; r += 2) {
+        for (int c = 7; c <= 67; c += 2) {
+            img(r, c) = 1;
         }
     }
 
-_exit_:
-    if( code < 0 )
-    {
-#if 0
-        cvNamedWindow( "test", 0 );
-        cvShowImage( "test", img[0] );
-        cvWaitKey();
-#endif
-        ts->set_failed_test_info( code );
-    }
+    // Last CC
+    img(9, 7) = 1;
 
-    return code;
+    vector< vector<Point> > contours;
+    vector<Vec4i> hierarchy;
+    findContours(img, contours, hierarchy, RETR_TREE, CHAIN_APPROX_NONE);
+
+    bool found = false;
+    size_t index = 0;
+    for (vector< vector<Point> >::const_iterator i = contours.begin(); i != contours.end(); ++i)
+    {
+        const vector<Point>& c = *i;
+        if (!c.empty() && c[0] == Point(7, 9))
+        {
+            found = true;
+            index = (size_t)(i - contours.begin());
+            break;
+        }
+    }
+    EXPECT_TRUE(found) << "Desired result: point (7,9) is a contour - Actual result: point (7,9) is not a contour";
+
+    if (found)
+    {
+        ASSERT_EQ(contours.size(), hierarchy.size());
+        EXPECT_LT(hierarchy[index][3], 0) << "Desired result: (7,9) has no parent - Actual result: parent of (7,9) is another contour. index = " << index;
+    }
 }
 
+TEST(Imgproc_DrawContours, regression_26264)
+{
+    Mat img = draw_hilbert(32);
+    img.push_back(~img);
 
-TEST(Imgproc_FindContours, accuracy) { CV_FindContourTest test; test.safe_run(); }
+    for (int i = 50; i < 200; i += 17)
+    {
+        rectangle(img, Rect(i, i, img.cols - (i*2), img.rows - (i*2)), Scalar(0), 7);
+        rectangle(img, Rect(i, i, img.cols - (i*2), img.rows - (i*2)), Scalar(255), 1);
+    }
 
+    vector<vector<Point> > contours;
+    vector<Vec4i> hierarchy;
+    findContours(img, contours, hierarchy, RETR_TREE, CHAIN_APPROX_SIMPLE);
+    img.setTo(Scalar::all(0));
+    Mat img1 = img.clone();
+    Mat img2 = img.clone();
+    Mat img3 = img.clone();
+
+    int idx = 0;
+    while (idx >= 0)
+    {
+        drawContours(img, contours, idx, Scalar::all(255), FILLED, LINE_8, hierarchy);
+        drawContours(img2, contours, idx, Scalar::all(255), 1, LINE_8, hierarchy);
+        idx = hierarchy[idx][0];
+    }
+
+    drawContours(img1, contours, -1, Scalar::all(255), FILLED, LINE_8, hierarchy);
+    drawContours(img3, contours, -1, Scalar::all(255), 1, LINE_8, hierarchy);
+    ASSERT_EQ(0, cvtest::norm(img, img1, NORM_INF));
+    ASSERT_EQ(0, cvtest::norm(img2, img3, NORM_INF));
+}
+
+TEST(Imgproc_DrawContours, MatListOfMatIntScalarInt)
+{
+    Mat gray0 = Mat::zeros(10, 10, CV_8U);
+    rectangle(gray0, Point(1, 2), Point(7, 8), Scalar(100));
+    vector<Mat> contours;
+    findContours(gray0, contours, noArray(), RETR_EXTERNAL, CHAIN_APPROX_SIMPLE);
+    drawContours(gray0, contours, -1, Scalar(0), FILLED);
+    int nz = countNonZero(gray0);
+    EXPECT_EQ(nz, 0);
+}
+
+}} // namespace
 /* End of file. */

@@ -48,7 +48,7 @@
 
 namespace cv
 {
-
+// A node represents a pixel to label
 struct WSNode
 {
     int next;
@@ -56,6 +56,7 @@ struct WSNode
     int img_ofs;
 };
 
+// Queue for WSNodes
 struct WSQueue
 {
     WSQueue() { first = last = 0; }
@@ -86,18 +87,28 @@ allocWSNodes( std::vector<WSNode>& storage )
 
 void cv::watershed( InputArray _src, InputOutputArray _markers )
 {
-    const int IN_QUEUE = -2;
-    const int WSHED = -1;
+    CV_INSTRUMENT_REGION();
+
+    // Labels for pixels
+    const int IN_QUEUE = -2; // Pixel visited
+    const int WSHED = -1; // Pixel belongs to watershed
+
+    // possible bit values = 2^8
     const int NQ = 256;
 
     Mat src = _src.getMat(), dst = _markers.getMat();
     Size size = src.size();
 
+    // Vector of every created node
     std::vector<WSNode> storage;
     int free_node = 0, node;
+    // Priority queue of queues of nodes
+    // from high priority (0) to low priority (255)
     WSQueue q[NQ];
+    // Non-empty queue with highest priority
     int active_queue;
     int i, j;
+    // Color differences
     int db, dg, dr;
     int subs_tab[513];
 
@@ -106,6 +117,7 @@ void cv::watershed( InputArray _src, InputOutputArray _markers )
     // MIN(a,b) = a - MAX(a-b,0)
     #define ws_min(a,b) ((a) - subs_tab[(a)-(b)+NQ])
 
+    // Create a new node with offsets mofs and iofs in queue idx
     #define ws_push(idx,mofs,iofs)          \
     {                                       \
         if( !free_node )                    \
@@ -122,6 +134,7 @@ void cv::watershed( InputArray _src, InputOutputArray _markers )
         q[idx].last = node;                 \
     }
 
+    // Get next node from queue idx
     #define ws_pop(idx,mofs,iofs)           \
     {                                       \
         node = q[idx].first;                \
@@ -134,6 +147,7 @@ void cv::watershed( InputArray _src, InputOutputArray _markers )
         iofs = storage[node].img_ofs;       \
     }
 
+    // Get highest absolute channel difference in diff
     #define c_diff(ptr1,ptr2,diff)           \
     {                                        \
         db = std::abs((ptr1)[0] - (ptr2)[0]);\
@@ -141,15 +155,20 @@ void cv::watershed( InputArray _src, InputOutputArray _markers )
         dr = std::abs((ptr1)[2] - (ptr2)[2]);\
         diff = ws_max(db,dg);                \
         diff = ws_max(diff,dr);              \
-        assert( 0 <= diff && diff <= 255 );  \
+        CV_Assert( 0 <= diff && diff <= 255 );  \
     }
 
     CV_Assert( src.type() == CV_8UC3 && dst.type() == CV_32SC1 );
     CV_Assert( src.size() == dst.size() );
 
-    const uchar* img = src.data;
+    // Current pixel in input image
+    const uchar* img = src.ptr();
+    // Step size to next row in input image
     int istep = int(src.step/sizeof(img[0]));
+
+    // Current pixel in mask image
     int* mask = dst.ptr<int>();
+    // Step size to next row in mask image
     int mstep = int(dst.step / sizeof(mask[0]));
 
     for( i = 0; i < 256; i++ )
@@ -166,7 +185,7 @@ void cv::watershed( InputArray _src, InputOutputArray _markers )
     for( i = 1; i < size.height-1; i++ )
     {
         img += istep; mask += mstep;
-        mask[0] = mask[size.width-1] = WSHED;
+        mask[0] = mask[size.width-1] = WSHED; // boundary pixels
 
         for( j = 1; j < size.width-1; j++ )
         {
@@ -174,6 +193,7 @@ void cv::watershed( InputArray _src, InputOutputArray _markers )
             if( m[0] < 0 ) m[0] = 0;
             if( m[0] == 0 && (m[-1] > 0 || m[1] > 0 || m[-mstep] > 0 || m[mstep] > 0) )
             {
+                // Find smallest difference to adjacent markers
                 const uchar* ptr = img + j*3;
                 int idx = 256, t;
                 if( m[-1] > 0 )
@@ -193,7 +213,9 @@ void cv::watershed( InputArray _src, InputOutputArray _markers )
                     c_diff( ptr, ptr + istep, t );
                     idx = ws_min( idx, t );
                 }
-                assert( 0 <= idx && idx <= 255 );
+
+                // Add to according queue
+                CV_Assert( 0 <= idx && idx <= 255 );
                 ws_push( idx, i*mstep + j, i*istep + j*3 );
                 m[0] = IN_QUEUE;
             }
@@ -210,7 +232,7 @@ void cv::watershed( InputArray _src, InputOutputArray _markers )
         return;
 
     active_queue = i;
-    img = src.data;
+    img = src.ptr();
     mask = dst.ptr<int>();
 
     // recursively fill the basins
@@ -221,6 +243,8 @@ void cv::watershed( InputArray _src, InputOutputArray _markers )
         int* m;
         const uchar* ptr;
 
+        // Get non-empty queue with highest priority
+        // Exit condition: empty priority queue
         if( q[active_queue].first == 0 )
         {
             for( i = active_queue+1; i < NQ; i++ )
@@ -231,35 +255,44 @@ void cv::watershed( InputArray _src, InputOutputArray _markers )
             active_queue = i;
         }
 
+        // Get next node
         ws_pop( active_queue, mofs, iofs );
 
+        // Calculate pointer to current pixel in input and marker image
         m = mask + mofs;
         ptr = img + iofs;
-        t = m[-1];
+
+        // Check surrounding pixels for labels
+        // to determine label for current pixel
+        t = m[-1]; // Left
         if( t > 0 ) lab = t;
-        t = m[1];
+        t = m[1]; // Right
         if( t > 0 )
         {
             if( lab == 0 ) lab = t;
             else if( t != lab ) lab = WSHED;
         }
-        t = m[-mstep];
+        t = m[-mstep]; // Top
         if( t > 0 )
         {
             if( lab == 0 ) lab = t;
             else if( t != lab ) lab = WSHED;
         }
-        t = m[mstep];
+        t = m[mstep]; // Bottom
         if( t > 0 )
         {
             if( lab == 0 ) lab = t;
             else if( t != lab ) lab = WSHED;
         }
-        assert( lab != 0 );
+
+        // Set label to current pixel in marker image
+        CV_Assert( lab != 0 );
         m[0] = lab;
+
         if( lab == WSHED )
             continue;
 
+        // Add adjacent, unlabeled pixels to corresponding queue
         if( m[-1] == 0 )
         {
             c_diff( ptr, ptr - 3, t );
@@ -301,6 +334,8 @@ void cv::pyrMeanShiftFiltering( InputArray _src, OutputArray _dst,
                                 double sp0, double sr, int max_level,
                                 TermCriteria termcrit )
 {
+    CV_INSTRUMENT_REGION();
+
     Mat src0 = _src.getMat();
 
     if( src0.empty() )
@@ -313,7 +348,7 @@ void cv::pyrMeanShiftFiltering( InputArray _src, OutputArray _dst,
     const int MAX_LEVELS = 8;
 
     if( (unsigned)max_level > (unsigned)MAX_LEVELS )
-        CV_Error( CV_StsOutOfRange, "The number of pyramid levels is too large or negative" );
+        CV_Error( cv::Error::StsOutOfRange, "The number of pyramid levels is too large or negative" );
 
     std::vector<cv::Mat> src_pyramid(max_level+1);
     std::vector<cv::Mat> dst_pyramid(max_level+1);
@@ -330,19 +365,19 @@ void cv::pyrMeanShiftFiltering( InputArray _src, OutputArray _dst,
 
 
     if( src0.type() != CV_8UC3 )
-        CV_Error( CV_StsUnsupportedFormat, "Only 8-bit, 3-channel images are supported" );
+        CV_Error( cv::Error::StsUnsupportedFormat, "Only 8-bit, 3-channel images are supported" );
 
     if( src0.type() != dst0.type() )
-        CV_Error( CV_StsUnmatchedFormats, "The input and output images must have the same type" );
+        CV_Error( cv::Error::StsUnmatchedFormats, "The input and output images must have the same type" );
 
     if( src0.size() != dst0.size() )
-        CV_Error( CV_StsUnmatchedSizes, "The input and output images must have the same size" );
+        CV_Error( cv::Error::StsUnmatchedSizes, "The input and output images must have the same size" );
 
-    if( !(termcrit.type & CV_TERMCRIT_ITER) )
+    if( !(termcrit.type & TermCriteria::MAX_ITER) )
         termcrit.maxCount = 5;
     termcrit.maxCount = MAX(termcrit.maxCount,1);
     termcrit.maxCount = MIN(termcrit.maxCount,100);
-    if( !(termcrit.type & CV_TERMCRIT_EPS) )
+    if( !(termcrit.type & TermCriteria::EPS) )
         termcrit.epsilon = 1.f;
     termcrit.epsilon = MAX(termcrit.epsilon, 0.f);
 
@@ -359,7 +394,6 @@ void cv::pyrMeanShiftFiltering( InputArray _src, OutputArray _dst,
         dst_pyramid[level].create( src_pyramid[level].rows,
                         src_pyramid[level].cols, src_pyramid[level].type() );
         cv::pyrDown( src_pyramid[level-1], src_pyramid[level], src_pyramid[level].size() );
-        //CV_CALL( cvResize( src_pyramid[level-1], src_pyramid[level], CV_INTER_AREA ));
     }
 
     mask0.create(src0.rows, src0.cols, CV_8UC1);
@@ -370,29 +404,26 @@ void cv::pyrMeanShiftFiltering( InputArray _src, OutputArray _dst,
     {
         cv::Mat src = src_pyramid[level];
         cv::Size size = src.size();
-        uchar* sptr = src.data;
+        const uchar* sptr = src.ptr();
         int sstep = (int)src.step;
-        uchar* mask = 0;
-        int mstep = 0;
         uchar* dptr;
         int dstep;
         float sp = (float)(sp0 / (1 << level));
         sp = MAX( sp, 1 );
 
+        cv::Mat m;
         if( level < max_level )
         {
             cv::Size size1 = dst_pyramid[level+1].size();
-            cv::Mat m( size.height, size.width, CV_8UC1, mask0.data );
+            m = cv::Mat(size.height, size.width, CV_8UC1, mask0.ptr());
             dstep = (int)dst_pyramid[level+1].step;
-            dptr = dst_pyramid[level+1].data + dstep + cn;
-            mstep = (int)m.step;
-            mask = m.data + mstep;
-            //cvResize( dst_pyramid[level+1], dst_pyramid[level], CV_INTER_CUBIC );
+            dptr = dst_pyramid[level+1].ptr() + dstep + cn;
             cv::pyrUp( dst_pyramid[level+1], dst_pyramid[level], dst_pyramid[level].size() );
             m.setTo(cv::Scalar::all(0));
 
-            for( i = 1; i < size1.height-1; i++, dptr += dstep - (size1.width-2)*3, mask += mstep*2 )
+            for( i = 1; i < size1.height-1; i++, dptr += dstep - (size1.width-2)*3)
             {
+                uchar* mask = m.ptr(1 + i * 2);
                 for( j = 1; j < size1.width-1; j++, dptr += cn )
                 {
                     int c0 = dptr[0], c1 = dptr[1], c2 = dptr[2];
@@ -402,16 +433,16 @@ void cv::pyrMeanShiftFiltering( InputArray _src, OutputArray _dst,
             }
 
             cv::dilate( m, m, cv::Mat() );
-            mask = m.data;
         }
 
-        dptr = dst_pyramid[level].data;
+        dptr = dst_pyramid[level].ptr();
         dstep = (int)dst_pyramid[level].step;
 
         for( i = 0; i < size.height; i++, sptr += sstep - size.width*3,
-                                          dptr += dstep - size.width*3,
-                                          mask += mstep )
+                                          dptr += dstep - size.width*3
+        )
         {
+            uchar* mask = m.empty() ? NULL : m.ptr(i);
             for( j = 0; j < size.width; j++, sptr += 3, dptr += 3 )
             {
                 int x0 = j, y0 = i, x1, y1, iter;
@@ -425,7 +456,7 @@ void cv::pyrMeanShiftFiltering( InputArray _src, OutputArray _dst,
                 // iterate meanshift procedure
                 for( iter = 0; iter < termcrit.maxCount; iter++ )
                 {
-                    uchar* ptr;
+                    const uchar* ptr;
                     int x, y, count = 0;
                     int minx, miny, maxx, maxy;
                     int s0 = 0, s1 = 0, s2 = 0, sx = 0, sy = 0;
@@ -512,25 +543,4 @@ void cv::pyrMeanShiftFiltering( InputArray _src, OutputArray _dst,
             }
         }
     }
-}
-
-
-///////////////////////////////////////////////////////////////////////////////////////////////
-
-CV_IMPL void cvWatershed( const CvArr* _src, CvArr* _markers )
-{
-    cv::Mat src = cv::cvarrToMat(_src), markers = cv::cvarrToMat(_markers);
-    cv::watershed(src, markers);
-}
-
-
-CV_IMPL void
-cvPyrMeanShiftFiltering( const CvArr* srcarr, CvArr* dstarr,
-                        double sp0, double sr, int max_level,
-                        CvTermCriteria termcrit )
-{
-    cv::Mat src = cv::cvarrToMat(srcarr);
-    const cv::Mat dst = cv::cvarrToMat(dstarr);
-
-    cv::pyrMeanShiftFiltering(src, dst, sp0, sr, max_level, termcrit);
 }

@@ -1,9 +1,9 @@
+// This file is part of OpenCV project.
+// It is subject to the license terms in the LICENSE file found in the top-level directory
+// of this distribution and at http://opencv.org/license.html.
 #include "test_precomp.hpp"
 
-#include <vector>
-
-using namespace cv;
-using namespace std;
+namespace opencv_test { namespace {
 
 const Size img_size(640, 480);
 const int LSD_TEST_SEED = 0x134679;
@@ -12,11 +12,11 @@ const int EPOCHS = 20;
 class LSDBase : public testing::Test
 {
 public:
-    LSDBase() {};
+    LSDBase() { }
 
 protected:
     Mat test_image;
-    vector<Vec4i> lines;
+    vector<Vec4f> lines;
     RNG rng;
     int passedtests;
 
@@ -30,7 +30,7 @@ protected:
 class Imgproc_LSD_ADV: public LSDBase
 {
 public:
-    Imgproc_LSD_ADV() {};
+    Imgproc_LSD_ADV() { }
 protected:
 
 };
@@ -38,7 +38,7 @@ protected:
 class Imgproc_LSD_STD: public LSDBase
 {
 public:
-    Imgproc_LSD_STD() {};
+    Imgproc_LSD_STD() { }
 protected:
 
 };
@@ -46,7 +46,15 @@ protected:
 class Imgproc_LSD_NONE: public LSDBase
 {
 public:
-    Imgproc_LSD_NONE() {};
+    Imgproc_LSD_NONE() { }
+protected:
+
+};
+
+class Imgproc_LSD_Common : public LSDBase
+{
+public:
+    Imgproc_LSD_Common() { }
 protected:
 
 };
@@ -216,7 +224,7 @@ TEST_F(Imgproc_LSD_NONE, whiteNoise)
     for (int i = 0; i < EPOCHS; ++i)
     {
         GenerateWhiteNoise(test_image);
-        Ptr<LineSegmentDetector> detector = createLineSegmentDetector(LSD_REFINE_STD);
+        Ptr<LineSegmentDetector> detector = createLineSegmentDetector(LSD_REFINE_NONE);
         detector->detect(test_image, lines);
 
         if(50u >= lines.size()) ++passedtests;
@@ -263,3 +271,228 @@ TEST_F(Imgproc_LSD_NONE, rotatedRect)
     }
     ASSERT_EQ(EPOCHS, passedtests);
 }
+
+TEST_F(Imgproc_LSD_Common, supportsVec4iResult)
+{
+    for (int i = 0; i < EPOCHS; ++i)
+    {
+        GenerateWhiteNoise(test_image);
+        Ptr<LineSegmentDetector> detector = createLineSegmentDetector(LSD_REFINE_STD);
+        detector->detect(test_image, lines);
+
+        std::vector<Vec4i> linesVec4i;
+        detector->detect(test_image, linesVec4i);
+
+        if (lines.size() == linesVec4i.size())
+        {
+            bool pass = true;
+            for (size_t lineIndex = 0; pass && lineIndex < lines.size(); lineIndex++)
+            {
+                for (int ch = 0; ch < 4; ch++)
+                {
+                    if (cv::saturate_cast<int>(lines[lineIndex][ch]) != linesVec4i[lineIndex][ch])
+                    {
+                        pass = false;
+                        break;
+                    }
+                }
+            }
+            if (pass)
+                ++passedtests;
+        }
+    }
+    ASSERT_EQ(EPOCHS, passedtests);
+}
+
+TEST_F(Imgproc_LSD_Common, drawSegmentsVec4f)
+{
+    GenerateConstColor(test_image);
+
+    std::vector<Vec4f> linesVec4f;
+    RNG cr(0); // constant seed for deterministic test
+    for (int j = 0; j < 10; j++) {
+        linesVec4f.push_back(
+            Vec4f(float(cr) * test_image.cols, float(cr) * test_image.rows, float(cr) * test_image.cols, float(cr) * test_image.rows));
+    }
+
+    Mat actual = Mat::zeros(test_image.size(), CV_8UC3);
+    Mat expected = Mat::zeros(test_image.size(), CV_8UC3);
+
+    Ptr<LineSegmentDetector> detector = createLineSegmentDetector(LSD_REFINE_STD);
+    detector->drawSegments(actual, linesVec4f);
+
+    // something should be drawn
+    ASSERT_EQ(sum(actual == expected) != Scalar::all(0), true);
+
+    for (size_t lineIndex = 0; lineIndex < linesVec4f.size(); lineIndex++)
+    {
+        const Vec4f &v = linesVec4f[lineIndex];
+        const Point2f b(v[0], v[1]);
+        const Point2f e(v[2], v[3]);
+        line(expected, b, e, Scalar(0, 0, 255), 1);
+    }
+
+    ASSERT_EQ(sum(actual != expected) == Scalar::all(0), true);
+}
+
+TEST_F(Imgproc_LSD_Common, drawSegmentsVec4i)
+{
+    GenerateConstColor(test_image);
+
+    std::vector<Vec4i> linesVec4i;
+    RNG cr(0); // constant seed for deterministic test
+    for (int j = 0; j < 10; j++) {
+        linesVec4i.push_back(
+            Vec4i(cr(test_image.cols), cr(test_image.rows), cr(test_image.cols), cr(test_image.rows)));
+    }
+
+    Mat actual = Mat::zeros(test_image.size(), CV_8UC3);
+    Mat expected = Mat::zeros(test_image.size(), CV_8UC3);
+
+    Ptr<LineSegmentDetector> detector = createLineSegmentDetector(LSD_REFINE_STD);
+    detector->drawSegments(actual, linesVec4i);
+
+    // something should be drawn
+    ASSERT_EQ(sum(actual == expected) != Scalar::all(0), true);
+
+    for (size_t lineIndex = 0; lineIndex < linesVec4i.size(); lineIndex++)
+    {
+        const Vec4f &v = linesVec4i[lineIndex];
+        const Point2f b(v[0], v[1]);
+        const Point2f e(v[2], v[3]);
+        line(expected, b, e, Scalar(0, 0, 255), 1);
+    }
+
+    ASSERT_EQ(sum(actual != expected) == Scalar::all(0), true);
+}
+
+TEST_F(Imgproc_LSD_Common, compareSegmentsVec4f)
+{
+    GenerateConstColor(test_image);
+    Ptr<LineSegmentDetector> detector = createLineSegmentDetector(LSD_REFINE_STD);
+
+    std::vector<Vec4f> lines1, lines2;
+    lines1.push_back(Vec4f(0, 0, 100, 200));
+    lines2.push_back(Vec4f(0, 0, 100, 200));
+    int result1 = detector->compareSegments(test_image.size(), lines1, lines2);
+
+    ASSERT_EQ(result1, 0);
+
+    lines2.push_back(Vec4f(100, 100, 110, 100));
+    int result2 = detector->compareSegments(test_image.size(), lines1, lines2);
+
+    ASSERT_EQ(result2, 11);
+}
+
+TEST_F(Imgproc_LSD_Common, compareSegmentsVec4i)
+{
+    GenerateConstColor(test_image);
+    Ptr<LineSegmentDetector> detector = createLineSegmentDetector(LSD_REFINE_STD);
+
+    std::vector<Vec4i> lines1, lines2;
+    lines1.push_back(Vec4i(0, 0, 100, 200));
+    lines2.push_back(Vec4i(0, 0, 100, 200));
+    int result1 = detector->compareSegments(test_image.size(), lines1, lines2);
+
+    ASSERT_EQ(result1, 0);
+
+    lines2.push_back(Vec4i(100, 100, 110, 100));
+    int result2 = detector->compareSegments(test_image.size(), lines1, lines2);
+
+    ASSERT_EQ(result2, 11);
+}
+
+TEST_F(Imgproc_LSD_Common, drawSegmentsEmpty)
+{
+    Ptr<LineSegmentDetector> detector = createLineSegmentDetector(LSD_REFINE_STD);
+    Mat1b img = Mat1b::zeros(240, 320);
+
+    std::vector<Vec4i> lines_4i;
+    detector->detect(img, lines_4i);
+
+    Mat3b img_color = Mat3b::zeros(240, 320);
+    ASSERT_NO_THROW(
+        detector->drawSegments(img_color, lines_4i);
+    );
+}
+
+///////////////////////////////////////////////////////////////////////////
+
+TEST(Imgproc_fitLine_vector_3d, regression)
+{
+    std::vector<Point3f> points_vector;
+
+    Point3f p21(4,4,4);
+    Point3f p22(8,8,8);
+
+    points_vector.push_back(p21);
+    points_vector.push_back(p22);
+
+    std::vector<float> line;
+
+    cv::fitLine(points_vector, line, DIST_L2, 0 ,0 ,0);
+
+    ASSERT_EQ(line.size(), (size_t)6);
+
+}
+
+TEST(Imgproc_fitLine_vector_2d, regression)
+{
+    std::vector<Point2f> points_vector;
+
+    Point2f p21(4,4);
+    Point2f p22(8,8);
+    Point2f p23(16,16);
+
+    points_vector.push_back(p21);
+    points_vector.push_back(p22);
+    points_vector.push_back(p23);
+
+    std::vector<float> line;
+
+    cv::fitLine(points_vector, line, DIST_L2, 0 ,0 ,0);
+
+    ASSERT_EQ(line.size(), (size_t)4);
+}
+
+TEST(Imgproc_fitLine_Mat_2dC2, regression)
+{
+    cv::Mat mat1 = Mat::zeros(3, 1, CV_32SC2);
+    std::vector<float> line1;
+
+    cv::fitLine(mat1, line1, DIST_L2, 0 ,0 ,0);
+
+    ASSERT_EQ(line1.size(), (size_t)4);
+}
+
+TEST(Imgproc_fitLine_Mat_2dC1, regression)
+{
+    cv::Matx<int, 3, 2> mat2;
+    std::vector<float> line2;
+
+    cv::fitLine(mat2, line2, DIST_L2, 0 ,0 ,0);
+
+    ASSERT_EQ(line2.size(), (size_t)4);
+}
+
+TEST(Imgproc_fitLine_Mat_3dC3, regression)
+{
+    cv::Mat mat1 = Mat::zeros(2, 1, CV_32SC3);
+    std::vector<float> line1;
+
+    cv::fitLine(mat1, line1, DIST_L2, 0 ,0 ,0);
+
+    ASSERT_EQ(line1.size(), (size_t)6);
+}
+
+TEST(Imgproc_fitLine_Mat_3dC1, regression)
+{
+    cv::Mat mat2 = Mat::zeros(2, 3, CV_32SC1);
+    std::vector<float> line2;
+
+    cv::fitLine(mat2, line2, DIST_L2, 0 ,0 ,0);
+
+    ASSERT_EQ(line2.size(), (size_t)6);
+}
+
+}} // namespace

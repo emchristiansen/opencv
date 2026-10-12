@@ -1,23 +1,36 @@
-### OpenCV: Open Source Computer Vision Library
+## OpenCV: Open Source Computer Vision Library
 
-#### Resources
 
-* Homepage: <http://opencv.org>
-* Docs: <http://docs.opencv.org>
-* Q&A forum: <http://answers.opencv.org>
-* Issue tracking: <http://code.opencv.org>
+### Resources
 
-#### Contributing
+* Homepage: <https://opencv.org>
+  * Courses: <https://opencv.org/courses>
+* Docs: <https://docs.opencv.org/5.x/>
+* Q&A forum: <https://forum.opencv.org>
+  * previous forum (read only): <http://answers.opencv.org>
+* Issue tracking: <https://github.com/opencv/opencv/issues>
+* Additional OpenCV functionality: <https://github.com/opencv/opencv_contrib>
+* Donate to OpenCV: <https://opencv.org/support/>
 
-Please read before starting work on a pull request: <http://code.opencv.org/projects/opencv/wiki/How_to_contribute>
 
-Summary of guidelines:
+### Contributing
+
+Please read the [contribution guidelines](https://github.com/opencv/opencv/wiki/How_to_contribute) before starting work on a pull request.
+
+#### Summary of the guidelines:
 
 * One pull request per issue;
 * Choose the right base branch;
 * Include tests and documentation;
 * Clean up "oops" commits before submitting;
-* Follow the coding style guide.
+* Follow the [coding style guide](https://github.com/opencv/opencv/wiki/Coding_Style_Guide).
 
-[![Donate OpenCV project](http://opencv.org/wp-content/uploads/2013/07/gittip1.png)](https://www.gittip.com/OpenCV/)
-[![Donate OpenCV project](http://opencv.org/wp-content/uploads/2013/07/paypal-donate-button.png)](https://www.paypal.com/cgi-bin/webscr?item_name=Donation+to+OpenCV&cmd=_donations&business=accountant%40opencv.org)
+### Additional Resources
+
+* [Submit your OpenCV-based project](https://form.jotform.com/233105358823151) for inclusion in Community Friday on opencv.org
+* [Subscribe to the OpenCV YouTube Channel](https://youtube.com/@opencvofficial) featuring OpenCV Live, an hour-long streaming show
+* [Follow OpenCV on LinkedIn](https://linkedin.com/company/opencv/) for daily posts showing the state-of-the-art in computer vision & AI
+* [Apply to be an OpenCV Volunteer](https://form.jotform.com/232745316792159) to help organize events and online campaigns as well as amplify them
+* [Follow OpenCV on Mastodon](https://mastodon.social/@opencv) in the Fediverse
+* [Follow OpenCV on X](https://x.com/opencvofficial)
+* [OpenCV.ai](https://opencv.ai): Computer Vision and AI development services from the OpenCV team.

@@ -1,4 +1,4 @@
-/***********************************************************************
+/*M*********************************************************************
  * Software License Agreement (BSD License)
  *
  * Copyright 2008-2009  Marius Muja (mariusm@cs.ubc.ca). All rights reserved.
@@ -35,7 +35,11 @@
 #ifndef OPENCV_FLANN_LSH_TABLE_H_
 #define OPENCV_FLANN_LSH_TABLE_H_
 
+//! @cond IGNORED
+
 #include <algorithm>
+#include <random>
+#include <cmath>
 #include <iostream>
 #include <iomanip>
 #include <limits.h>
@@ -50,11 +54,16 @@
 #else
 #include <map>
 #endif
-#include <math.h>
 #include <stddef.h>
 
 #include "dynamic_bitset.h"
 #include "matrix.h"
+
+#ifdef _MSC_VER
+#pragma warning(push)
+#pragma warning(disable: 4702) //disable unreachable code
+#endif
+
 
 namespace cvflann
 {
@@ -146,6 +155,9 @@ public:
      */
     LshTable()
     {
+        key_size_ = 0;
+        feature_size_ = 0;
+        speed_level_ = kArray;
     }
 
     /** Default constructor
@@ -153,10 +165,11 @@ public:
      * @param feature_size is the size of the feature (considered as a ElementType[])
      * @param key_size is the number of bits that are turned on in the feature
      */
-    LshTable(unsigned int /*feature_size*/, unsigned int /*key_size*/)
+    LshTable(unsigned int feature_size, unsigned int key_size)
     {
-        std::cerr << "LSH is not implemented for that type" << std::endl;
-        assert(0);
+        feature_size_ = feature_size;
+        CV_UNUSED(key_size);
+        CV_Error(cv::Error::StsUnsupportedFormat, "LSH is not implemented for that type" );
     }
 
     /** Add a feature to the table
@@ -193,7 +206,7 @@ public:
     void add(Matrix<ElementType> dataset)
     {
 #if USE_UNORDERED_MAP
-        buckets_space_.rehash((buckets_space_.size() + dataset.rows) * 1.2);
+        buckets_space_.rehash(std::llround((buckets_space_.size() + dataset.rows) * 1.2));
 #endif
         // Add the features to the table
         for (unsigned int i = 0; i < dataset.rows; ++i) add(i, dataset[i]);
@@ -202,8 +215,6 @@ public:
     }
 
     /** Get a bucket given the key
-     * @param key
-     * @return
      */
     inline const Bucket* getBucketFromKey(BucketKey key) const
     {
@@ -236,13 +247,11 @@ public:
      */
     size_t getKey(const ElementType* /*feature*/) const
     {
-        std::cerr << "LSH is not implemented for that type" << std::endl;
-        assert(0);
-        return 1;
+        CV_Error(cv::Error::StsUnsupportedFormat, "LSH is not implemented for that type" );
+        return 0;
     }
 
     /** Get statistics about the table
-     * @return
      */
     LshStats getStats() const;
 
@@ -263,7 +272,7 @@ private:
     {
         const size_t key_size_lower_bound = 1;
         //a value (size_t(1) << key_size) must fit the size_t type so key_size has to be strictly less than size of size_t
-        const size_t key_size_upper_bound = std::min(sizeof(BucketKey) * CHAR_BIT + 1, sizeof(size_t) * CHAR_BIT);
+        const size_t key_size_upper_bound = (std::min)(sizeof(BucketKey) * CHAR_BIT + 1, sizeof(size_t) * CHAR_BIT);
         if (key_size < key_size_lower_bound || key_size >= key_size_upper_bound)
         {
             CV_Error(cv::Error::StsBadArg, cv::format("Invalid key_size (=%d). Valid values for your system are %d <= key_size < %d.", (int)key_size, (int)key_size_lower_bound, (int)key_size_upper_bound));
@@ -328,6 +337,8 @@ private:
      */
     unsigned int key_size_;
 
+    unsigned int feature_size_;
+
     // Members only used for the unsigned char specialization
     /** The mask to apply to a feature to get the hash key
      * Only used in the unsigned char case
@@ -341,14 +352,20 @@ private:
 template<>
 inline LshTable<unsigned char>::LshTable(unsigned int feature_size, unsigned int subsignature_size)
 {
+    feature_size_ = feature_size;
     initialize(subsignature_size);
     // Allocate the mask
-    mask_ = std::vector<size_t>((size_t)ceil((float)(feature_size * sizeof(char)) / (float)sizeof(size_t)), 0);
+    mask_ = std::vector<size_t>((feature_size * sizeof(char) + sizeof(size_t) - 1) / sizeof(size_t), 0);
 
     // A bit brutal but fast to code
-    std::vector<size_t> indices(feature_size * CHAR_BIT);
-    for (size_t i = 0; i < feature_size * CHAR_BIT; ++i) indices[i] = i;
-    std::random_shuffle(indices.begin(), indices.end());
+    std::vector<int> indices(feature_size * CHAR_BIT);
+    for (size_t i = 0; i < feature_size * CHAR_BIT; ++i) indices[i] = (int)i;
+#ifndef OPENCV_FLANN_USE_STD_RAND
+    cv::randShuffle(indices);
+#else
+    std::mt19937 std_rng(12345);
+    std::shuffle(indices.begin(), indices.end(), std_rng);
+#endif
 
     // Generate a random set of order of subsignature_size_ bits
     for (unsigned int i = 0; i < key_size_; ++i) {
@@ -384,6 +401,7 @@ inline size_t LshTable<unsigned char>::getKey(const unsigned char* feature) cons
 {
     // no need to check if T is dividable by sizeof(size_t) like in the Hamming
     // distance computation as we have a mask
+    // FIXIT: This is bad assumption, because we reading tail bytes after of the allocated features buffer
     const size_t* feature_block_ptr = reinterpret_cast<const size_t*> ((const void*)feature);
 
     // Figure out the subsignature of the feature
@@ -392,13 +410,23 @@ inline size_t LshTable<unsigned char>::getKey(const unsigned char* feature) cons
     size_t subsignature = 0;
     size_t bit_index = 1;
 
-    for (std::vector<size_t>::const_iterator pmask_block = mask_.begin(); pmask_block != mask_.end(); ++pmask_block) {
+    for (unsigned i = 0; i < feature_size_; i += sizeof(size_t)) {
         // get the mask and signature blocks
-        size_t feature_block = *feature_block_ptr;
-        size_t mask_block = *pmask_block;
+        size_t feature_block;
+        if (i <= feature_size_ - sizeof(size_t))
+        {
+            feature_block = *feature_block_ptr;
+        }
+        else
+        {
+            size_t tmp = 0;
+            memcpy(&tmp, feature_block_ptr, feature_size_ - i); // preserve bytes order
+            feature_block = tmp;
+        }
+        size_t mask_block = mask_[i / sizeof(size_t)];
         while (mask_block) {
             // Get the lowest set bit in the mask block
-            size_t lowest_bit = mask_block & (-(ptrdiff_t)mask_block);
+            size_t lowest_bit = mask_block & ~(mask_block - 1);
             // Add it to the current subsignature if necessary
             subsignature += (feature_block & lowest_bit) ? bit_index : 0;
             // Reset the bit in the mask block
@@ -464,7 +492,7 @@ inline LshStats LshTable<unsigned char>::getStats() const
          != end; )
         if (*iterator < bin_end) {
             if (is_new_bin) {
-                stats.size_histogram_.push_back(std::vector<unsigned int>(3, 0));
+                stats.size_histogram_.emplace_back(3, 0);
                 stats.size_histogram_.back()[0] = bin_start;
                 stats.size_histogram_.back()[1] = bin_end - 1;
                 is_new_bin = false;
@@ -485,6 +513,12 @@ inline LshStats LshTable<unsigned char>::getStats() const
 }
 }
 
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
+
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+//! @endcond
 
 #endif /* OPENCV_FLANN_LSH_TABLE_H_ */

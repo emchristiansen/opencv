@@ -1,127 +1,103 @@
-set(the_description "All the selected OpenCV modules in a single binary")
+set(the_description "All OpenCV modules")
 set(OPENCV_MODULE_IS_PART_OF_WORLD FALSE)
 set(BUILD_opencv_world_INIT OFF)
 
-if(IOS OR NOT BUILD_SHARED_LIBS)
+if(NOT BUILD_SHARED_LIBS)
   set(OPENCV_MODULE_TYPE STATIC)
   set(OPENCV_WORLD_FLAGS_PROPERTY STATIC_LIBRARY_FLAGS)
 else()
   set(OPENCV_WORLD_FLAGS_PROPERTY LINK_FLAGS)
 endif()
 
-ocv_add_module(world opencv_core)
-
-if(MSVC)
-  foreach(_var CMAKE_EXE_LINKER_FLAGS_RELEASE CMAKE_MODULE_LINKER_FLAGS_RELEASE CMAKE_SHARED_LINKER_FLAGS_RELEASE
-               CMAKE_EXE_LINKER_FLAGS_DEBUG   CMAKE_MODULE_LINKER_FLAGS_DEBUG   CMAKE_SHARED_LINKER_FLAGS_DEBUG)
-    string(REPLACE "/INCREMENTAL:NO" "/INCREMENTAL:YES" ${_var} "${${_var}}")
+function(include_one_module m)
+  include("${OPENCV_MODULE_${m}_LOCATION}/CMakeLists.txt")
+  foreach(var
+      CMAKE_CXX_FLAGS CMAKE_C_FLAGS # Propagate warnings settings
+  )
+    set(${var} "${${var}}" PARENT_SCOPE)
   endforeach()
-endif()
+endfunction()
 
-ocv_glob_module_sources()
-ocv_module_include_directories()
-ocv_create_module(SKIP_LINK)
+if(NOT OPENCV_INITIAL_PASS)
+  set(ENABLE_PRECOMPILED_HEADERS OFF CACHE INTERNAL "" FORCE)
+  project(opencv_world)
 
-#TODO: try to use try_compile to find real object file extension/location
-if(CMAKE_GENERATOR MATCHES "^Visual.*$")
-  set(have_cfg 1)
-  set(objpath0 "<MODULE_NAME>.dir/<CONFIGURATION>/<SRC_NAME_WE>.obj")
-elseif (CMAKE_GENERATOR MATCHES Xcode)
-  set(have_cfg 1)
-  set(objpath0 "OpenCV.build/$(CONFIGURATION)$(EFFECTIVE_PLATFORM_NAME)/<MODULE_NAME>.build/Objects-normal/$(CURRENT_ARCH)/<SRC_NAME_WE>.o")
-else()
-  set(have_cfg 0)
-  set(objpath0 "CMakeFiles/<MODULE_NAME>.dir/<RELATIVE_SRC_NAME>.o")
-  if(MINGW OR MSVC)
-    set(objpath0 "${objpath0}bj")
-  endif()
-endif()
-
-set(objlist "")
-foreach(m ${OPENCV_MODULE_${the_module}_DEPS})
-  # build order dependencies
-  add_dependencies(${the_module} ${m})
-  # link dependencies
-  string(REGEX REPLACE "(general|debug|optimized);opencv_[^;]*(;|$)" "" _link_deps "${${m}_LIB_DEPENDS}")
-  if(_link_deps)
-    target_link_libraries(${the_module} ${_link_deps})
+  # MSVS 2014 (vc14): LINK : fatal error LNK1210: exceeded internal ILK size limit; link with /INCREMENTAL:NO
+  if(MSVC AND MSVC_VERSION EQUAL 1900)
+    foreach(flag_var
+            CMAKE_EXE_LINKER_FLAGS_DEBUG
+            CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO
+            CMAKE_MODULE_LINKER_FLAGS_DEBUG
+            CMAKE_MODULE_LINKER_FLAGS_RELWITHDEBINFO
+            CMAKE_SHARED_LINKER_FLAGS_DEBUG
+            CMAKE_SHARED_LINKER_FLAGS_RELWITHDEBINFO
+    )
+      if(${flag_var} MATCHES "/INCREMENTAL")
+        string(REGEX REPLACE "/INCREMENTAL[^ ]*" "/INCREMENTAL:NO" ${flag_var} "${${flag_var}}")
+      else()
+        set(${flag_var} "${${flag_var}} /INCREMENTAL:NO*")
+      endif()
+    endforeach(flag_var)
   endif()
 
-  string(REGEX REPLACE "<MODULE_NAME>" "${m}" objpath1 "${${m}_BINARY_DIR}/${objpath0}")
-  foreach(srcname ${OPENCV_MODULE_${m}_SOURCES})
-    if(srcname MATCHES "\\.(cpp|mm|c|cxx|cc|o|obj)$")
-      if(srcname MATCHES "\\.(o|obj)$")
-        if(IS_ABSOLUTE "${srcname}")
-          set(objpath3 "${srcname}")
-        else()
-          set(objpath3 "${${m}_SOURCE_DIR}/${srcname}")
-        endif()
-      else()
-        if(IS_ABSOLUTE "${srcname}")
-          if(srcname MATCHES "/(qrc|moc)_[^/]*\\.cxx$")
-            # QT generated sources
-            file(RELATIVE_PATH srcname "${${m}_BINARY_DIR}" "${srcname}")
-          else()
-            file(RELATIVE_PATH srcname "${OPENCV_MODULE_${m}_LOCATION}" "${srcname}")
-          endif()
-        endif()
-        string(REPLACE ".." "__" srcname "${srcname}")
-        get_filename_component(srcname_we ${srcname} NAME_WE)
-        string(REGEX REPLACE <SRC_NAME_WE> "${srcname_we}" objpath2 "${objpath1}")
-        string(REGEX REPLACE <RELATIVE_SRC_NAME> "${srcname}" objpath3 "${objpath2}")
-      endif()
-      if(CMAKE_GENERATOR MATCHES Makefiles)
-        file(RELATIVE_PATH objpath4 "${CMAKE_CURRENT_BINARY_DIR}" "${objpath3}")
-      else()
-        set(objpath4 ${objpath3})
-      endif()
-      list(APPEND objlist "\"${objpath4}\"")
+  message(STATUS "Processing WORLD modules...")
+  foreach(m ${OPENCV_MODULES_BUILD})
+    set(the_module ${m})
+    if(OPENCV_MODULE_${m}_IS_PART_OF_WORLD)
+      message(STATUS "    module ${m}...")
+      set(CMAKE_CURRENT_SOURCE_DIR "${OPENCV_MODULE_${m}_LOCATION}")
+      #add_subdirectory("${OPENCV_MODULE_${m}_LOCATION}" ${CMAKE_CURRENT_BINARY_DIR}/${m})
+      include_one_module(${m})
     endif()
   endforeach()
+  message(STATUS "Processing WORLD modules... DONE")
+  set(CMAKE_CURRENT_SOURCE_DIR "${OPENCV_MODULE_opencv_world_LOCATION}")
+endif()
+
+ocv_add_module(world opencv_core)
+
+set(headers_list)
+set(sources_list)
+set(link_deps "")
+foreach(m ${OPENCV_MODULE_${the_module}_DEPS} opencv_world)
+  if(OPENCV_MODULE_${m}_IS_PART_OF_WORLD)
+    list(APPEND headers_list ${OPENCV_MODULE_${m}_HEADERS})
+    list(APPEND sources_list ${OPENCV_MODULE_${m}_SOURCES})
+  endif()
+  if(NOT " ${OPENCV_MODULE_${m}_LINK_DEPS}" STREQUAL " ")
+    list(APPEND link_deps ${OPENCV_MODULE_${m}_LINK_DEPS})
+  endif()
 endforeach()
 
-
-macro(ios_include_3party_libs)
-  foreach(l ${ARGN})
-    add_dependencies(${the_module} ${l})
-    string(REGEX REPLACE "<MODULE_NAME>" "${l}" objpath1 "${CMAKE_BINARY_DIR}/3rdparty/${l}/${objpath0}")
-    file(GLOB sources ${CMAKE_SOURCE_DIR}/3rdparty/${l}/*.c)
-    foreach(srcname ${sources})
-      if(IS_ABSOLUTE "${srcname}")
-        file(RELATIVE_PATH srcname "${CMAKE_SOURCE_DIR}/3rdparty/${l}" "${srcname}")
-      endif()
-
-      string(REPLACE ".." "__" srcname "${srcname}")
-      get_filename_component(srcname_we ${srcname} NAME_WE)
-      string(REGEX REPLACE <SRC_NAME_WE> "${srcname_we}" objpath2 "${objpath1}")
-      string(REGEX REPLACE <RELATIVE_SRC_NAME> "${srcname}" objpath3 "${objpath2}")
-
-      list(APPEND objlist "\"${objpath3}\"")
-    endforeach() # (srcname ${sources})
-  endforeach()
-endmacro()
-
-if(IOS AND WITH_PNG)
-  ios_include_3party_libs(zlib libpng)
+# MLAS_OBJECTS (set with PARENT_SCOPE inside 3rdparty/mlas) doesn't
+# survive back to this scope. Pull the OBJECT library objects
+# in directly using the globally-visible target and cache flag.
+if(OPENCV_DNN_MLAS_ENABLED AND TARGET opencv_dnn_mlas)
+  list(APPEND sources_list $<TARGET_OBJECTS:opencv_dnn_mlas>)
 endif()
 
-if(IOS AND WITH_JPEG)
-  ios_include_3party_libs(libjpeg)
+ocv_glob_module_sources(HEADERS ${headers_list} SOURCES ${sources_list})
+
+ocv_module_include_directories()
+
+#message(STATUS "${OPENCV_MODULE_${the_module}_HEADERS}")
+#message(STATUS "${OPENCV_MODULE_${the_module}_SOURCES}")
+ocv_create_module(${link_deps})
+
+if(";${OPENCV_MODULES_BUILD};" MATCHES ";opencv_viz;" AND OPENCV_MODULE_opencv_viz_IS_PART_OF_WORLD AND NOT (VTK_VERSION VERSION_LESS "8.90.0"))
+  vtk_module_autoinit(TARGETS opencv_world MODULES ${VTK_LIBRARIES})
 endif()
 
-string(REPLACE ";" " " objlist "${objlist}")
+ocv_target_compile_definitions(${the_module} PRIVATE OPENCV_MODULE_IS_PART_OF_WORLD=1)
 
-if(have_cfg)
-  string(REGEX REPLACE "<CONFIGURATION>" "Debug" objlist_dbg "${objlist}")
-  string(REGEX REPLACE "<CONFIGURATION>" "Release" objlist_rls "${objlist}")
-  set_target_properties(${the_module} PROPERTIES
-    ${OPENCV_WORLD_FLAGS_PROPERTY}_DEBUG ${objlist_dbg}
-    ${OPENCV_WORLD_FLAGS_PROPERTY}_RELEASE ${objlist_rls})
-else()
-  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/world_objects.list" "${objlist}")
-  execute_process(COMMAND ${CMAKE_COMMAND} -E copy_if_different "${CMAKE_CURRENT_BINARY_DIR}/world_objects.list" "${CMAKE_CURRENT_BINARY_DIR}/world_objects.rsp" OUTPUT_QUIET)
-  set_target_properties(${the_module} PROPERTIES
-    ${OPENCV_WORLD_FLAGS_PROPERTY} "@${CMAKE_CURRENT_BINARY_DIR}/world_objects.rsp")
+# NOTE: https://github.com/opencv/opencv/issues/25543
+if (WITH_QT AND QT_VERSION_MAJOR GREATER 5)
+  qt_disable_unicode_defines(${the_module})
 endif()
 
-ocv_add_precompiled_headers(${the_module})
+if(BUILD_opencv_imgcodecs AND OPENCV_MODULE_opencv_imgcodecs_IS_PART_OF_WORLD)
+  ocv_imgcodecs_configure_target()
+endif()
+if(BUILD_opencv_highgui AND OPENCV_MODULE_opencv_highgui_IS_PART_OF_WORLD)
+  ocv_highgui_configure_target()
+endif()

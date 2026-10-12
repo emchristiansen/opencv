@@ -4,7 +4,7 @@
 #include <opencv2/core.hpp>      // Basic OpenCV structures
 #include <opencv2/core/utility.hpp>
 #include <opencv2/imgproc.hpp>// Image processing methods for the CPU
-#include <opencv2/highgui.hpp>// Read images
+#include <opencv2/imgcodecs.hpp>// Read images
 
 // CUDA structures and methods
 #include <opencv2/cudaarithm.hpp>
@@ -19,14 +19,17 @@ Scalar getMSSIM( const Mat& I1, const Mat& I2);
 double getPSNR_CUDA(const Mat& I1, const Mat& I2);  // Basic CUDA versions
 Scalar getMSSIM_CUDA( const Mat& I1, const Mat& I2);
 
+//! [psnr]
 struct BufferPSNR                                     // Optimized CUDA versions
 {   // Data allocations are very expensive on CUDA. Use a buffer to solve: allocate once reuse later.
     cuda::GpuMat gI1, gI2, gs, t1,t2;
 
     cuda::GpuMat buf;
 };
+//! [psnr]
 double getPSNR_CUDA_optimized(const Mat& I1, const Mat& I2, BufferPSNR& b);
 
+//! [ssim]
 struct BufferMSSIM                                     // Optimized CUDA versions
 {   // Data allocations are very expensive on CUDA. Use a buffer to solve: allocate once reuse later.
     cuda::GpuMat gI1, gI2, gs, t1,t2;
@@ -44,6 +47,7 @@ struct BufferMSSIM                                     // Optimized CUDA version
 
     cuda::GpuMat buf;
 };
+//! [ssim]
 Scalar getMSSIM_CUDA_optimized( const Mat& i1, const Mat& i2, BufferMSSIM& b);
 
 static void help()
@@ -73,7 +77,7 @@ int main(int, char *argv[])
     BufferPSNR bufferPSNR;
     BufferMSSIM bufferMSSIM;
 
-    int TIMES;
+    int TIMES = 10;
     stringstream sstr(argv[3]);
     sstr >> TIMES;
     double time, result = 0;
@@ -165,7 +169,7 @@ int main(int, char *argv[])
     return 0;
 }
 
-
+//! [getpsnr]
 double getPSNR(const Mat& I1, const Mat& I2)
 {
     Mat s1;
@@ -177,18 +181,17 @@ double getPSNR(const Mat& I1, const Mat& I2)
 
     double sse = s.val[0] + s.val[1] + s.val[2]; // sum channels
 
-    if( sse <= 1e-10) // for small values return zero
-        return 0;
-    else
-    {
-        double  mse =sse /(double)(I1.channels() * I1.total());
-        double psnr = 10.0*log10((255*255)/mse);
-        return psnr;
-    }
+    double  mse = sse /(double)(I1.channels() * I1.total());
+
+    // For very small SSE, add epsilon to approximate infinite PSNR (~361 dB)
+    if( sse <= 1e-10) mse+= DBL_EPSILON;
+
+    double psnr = 10.0*log10((255*255)/mse);
+    return psnr;
 }
+//! [getpsnr]
 
-
-
+//! [getpsnropt]
 double getPSNR_CUDA_optimized(const Mat& I1, const Mat& I2, BufferPSNR& b)
 {
     b.gI1.upload(I1);
@@ -202,16 +205,17 @@ double getPSNR_CUDA_optimized(const Mat& I1, const Mat& I2, BufferPSNR& b)
 
     double sse = cuda::sum(b.gs, b.buf)[0];
 
-    if( sse <= 1e-10) // for small values return zero
-        return 0;
-    else
-    {
-        double mse = sse /(double)(I1.channels() * I1.total());
-        double psnr = 10.0*log10((255*255)/mse);
-        return psnr;
-    }
-}
+    double mse = sse /(double)(I1.channels() * I1.total());
 
+    // For very small SSE, add epsilon to approximate infinite PSNR (~361 dB)
+    if (sse <= 1e-10) mse += DBL_EPSILON;
+
+    double psnr = 10.0*log10((255*255)/mse);
+    return psnr;
+}
+//! [getpsnropt]
+
+//! [getpsnrcuda]
 double getPSNR_CUDA(const Mat& I1, const Mat& I2)
 {
     cuda::GpuMat gI1, gI2, gs, t1,t2;
@@ -228,16 +232,17 @@ double getPSNR_CUDA(const Mat& I1, const Mat& I2)
     Scalar s = cuda::sum(gs);
     double sse = s.val[0] + s.val[1] + s.val[2];
 
-    if( sse <= 1e-10) // for small values return zero
-        return 0;
-    else
-    {
-        double  mse =sse /(double)(gI1.channels() * I1.total());
-        double psnr = 10.0*log10((255*255)/mse);
-        return psnr;
-    }
-}
+    double  mse = sse /(double)(gI1.channels() * I1.total());
 
+    // For very small SSE, add epsilon to approximate infinite PSNR (~361 dB)
+    if( sse <= 1e-10) mse+= DBL_EPSILON;
+
+    double psnr = 10.0*log10((255*255)/mse);
+    return psnr;
+}
+//! [getpsnrcuda]
+
+//! [getssim]
 Scalar getMSSIM( const Mat& i1, const Mat& i2)
 {
     const double C1 = 6.5025, C2 = 58.5225;
@@ -290,7 +295,9 @@ Scalar getMSSIM( const Mat& i1, const Mat& i2)
     Scalar mssim = mean( ssim_map ); // mssim = average of ssim map
     return mssim;
 }
+//! [getssim]
 
+//! [getssimcuda]
 Scalar getMSSIM_CUDA( const Mat& i1, const Mat& i2)
 {
     const float C1 = 6.5025f, C2 = 58.5225f;
@@ -359,7 +366,9 @@ Scalar getMSSIM_CUDA( const Mat& i1, const Mat& i2)
     }
     return mssim;
 }
+//! [getssimcuda]
 
+//! [getssimopt]
 Scalar getMSSIM_CUDA_optimized( const Mat& i1, const Mat& i2, BufferMSSIM& b)
 {
     const float C1 = 6.5025f, C2 = 58.5225f;
@@ -430,3 +439,4 @@ Scalar getMSSIM_CUDA_optimized( const Mat& i1, const Mat& i2, BufferMSSIM& b)
     }
     return mssim;
 }
+//! [getssimopt]

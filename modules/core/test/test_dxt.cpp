@@ -1,10 +1,11 @@
+// This file is part of OpenCV project.
+// It is subject to the license terms in the LICENSE file found in the top-level directory
+// of this distribution and at http://opencv.org/license.html.
 #include "test_precomp.hpp"
 
-using namespace cv;
-using namespace std;
+#define CV_TEST_DXT_MUL_CONJ 8 /**< conjugate the second argument of cvMulSpectrums */
 
-namespace cvtest
-{
+namespace opencv_test { namespace {
 
 static Mat initDFTWave( int n, bool inv )
 {
@@ -39,8 +40,8 @@ static void DFT_1D( const Mat& _src, Mat& _dst, int flags, const Mat& _wave=Mat(
     double scale = (flags & DFT_SCALE) ? 1./n : 1.;
     size_t esz = _src.elemSize();
     size_t srcstep = esz, dststep = esz;
-    const uchar* src0 = _src.data;
-    uchar* dst0 = _dst.data;
+    const uchar* src0 = _src.ptr();
+    uchar* dst0 = _dst.ptr();
 
     CV_Assert( _src.cols + _src.rows - 1 == n );
 
@@ -98,7 +99,7 @@ static void DFT_1D( const Mat& _src, Mat& _dst, int flags, const Mat& _wave=Mat(
         }
     }
     else
-        CV_Error(CV_StsUnsupportedFormat, "");
+        CV_Error(cv::Error::StsUnsupportedFormat, "");
 }
 
 
@@ -205,7 +206,7 @@ static void DCT_1D( const Mat& _src, Mat& _dst, int flags, const Mat& _wave=Mat(
         }
     }
     else
-        assert(0);
+        CV_Assert(0);
 }
 
 
@@ -419,9 +420,6 @@ static void fixCCS( Mat& mat, int cols, int flags )
     }
 }
 
-#if defined _MSC_VER &&  _MSC_VER >= 1700
-#pragma optimize("", off)
-#endif
 static void mulComplex( const Mat& src1, const Mat& src2, Mat& dst, int flags )
 {
     dst.create(src1.rows, src1.cols, src1.type());
@@ -430,15 +428,30 @@ static void mulComplex( const Mat& src1, const Mat& src2, Mat& dst, int flags )
     CV_Assert( src1.size == src2.size && src1.type() == src2.type() &&
               (src1.type() == CV_32FC2 || src1.type() == CV_64FC2) );
 
+    const Mat* src1_ = &src1;
+    Mat src1_tmp;
+    if (dst.data == src1.data)
+    {
+        src1_tmp = src1.clone();
+        src1_ = &src1_tmp;
+    }
+    const Mat* src2_ = &src2;
+    Mat src2_tmp;
+    if (dst.data == src2.data)
+    {
+        src2_tmp = src2.clone();
+        src2_ = &src2_tmp;
+    }
+
     for( i = 0; i < dst.rows; i++ )
     {
         if( depth == CV_32F )
         {
-            const float* a = src1.ptr<float>(i);
-            const float* b = src2.ptr<float>(i);
+            const float* a = src1_->ptr<float>(i);
+            const float* b = src2_->ptr<float>(i);
             float* c = dst.ptr<float>(i);
 
-            if( !(flags & CV_DXT_MUL_CONJ) )
+            if( !(flags & CV_TEST_DXT_MUL_CONJ) )
                 for( j = 0; j < cols; j += 2 )
                 {
                     double re = (double)a[j]*(double)b[j] - (double)a[j+1]*(double)b[j+1];
@@ -459,11 +472,11 @@ static void mulComplex( const Mat& src1, const Mat& src2, Mat& dst, int flags )
         }
         else
         {
-            const double* a = src1.ptr<double>(i);
-            const double* b = src2.ptr<double>(i);
+            const double* a = src1_->ptr<double>(i);
+            const double* b = src2_->ptr<double>(i);
             double* c = dst.ptr<double>(i);
 
-            if( !(flags & CV_DXT_MUL_CONJ) )
+            if( !(flags & CV_TEST_DXT_MUL_CONJ) )
                 for( j = 0; j < cols; j += 2 )
                 {
                     double re = a[j]*b[j] - a[j+1]*b[j+1];
@@ -484,12 +497,6 @@ static void mulComplex( const Mat& src1, const Mat& src2, Mat& dst, int flags )
         }
     }
 }
-#if defined _MSC_VER &&  _MSC_VER >= 1700
-#pragma optimize("", on)
-#endif
-
-}
-
 
 class CxCore_DXTBaseTest : public cvtest::ArrayTest
 {
@@ -541,22 +548,22 @@ void CxCore_DXTBaseTest::get_test_array_types_and_sizes( int test_case_idx,
     Size size;
     Base::get_test_array_types_and_sizes( test_case_idx, sizes, types );
 
-    flags = bits & (CV_DXT_INVERSE | CV_DXT_SCALE | CV_DXT_ROWS | CV_DXT_MUL_CONJ);
+    flags = bits & (cv::DFT_INVERSE | cv::DFT_SCALE | cv::DFT_ROWS | CV_TEST_DXT_MUL_CONJ);
     if( spectrum_mode )
-        flags &= ~CV_DXT_INVERSE;
+        flags &= ~cv::DFT_INVERSE;
     types[TEMP][0] = types[TEMP][1] = types[INPUT][0] =
     types[OUTPUT][0] = CV_MAKETYPE(depth, cn);
     size = sizes[INPUT][0];
 
     temp_dst = false;
 
-    if( flags & CV_DXT_ROWS && (bits&1024) )
+    if( flags & cv::DFT_ROWS && (bits&1024) )
     {
         if( bits&16 )
             size.width = 1;
         else
             size.height = 1;
-        flags &= ~CV_DXT_ROWS;
+        flags &= ~cv::DFT_ROWS;
     }
 
     const int P2_MIN_SIZE = 32;
@@ -573,18 +580,18 @@ void CxCore_DXTBaseTest::get_test_array_types_and_sizes( int test_case_idx,
         if( size.width > 1 && (size.width&1) != 0 )
             size.width = (size.width + 1) & -2;
 
-        if( size.height > 1 && (size.height&1) != 0 && !(flags & CV_DXT_ROWS) )
+        if( size.height > 1 && (size.height&1) != 0 && !(flags & cv::DFT_ROWS) )
             size.height = (size.height + 1) & -2;
     }
 
     sizes[INPUT][0] = sizes[OUTPUT][0] = size;
-    sizes[TEMP][0] = sizes[TEMP][1] = cvSize(0,0);
+    sizes[TEMP][0] = sizes[TEMP][1] = cv::Size(0,0);
 
     if( spectrum_mode )
     {
         if( cn == 1 )
         {
-            types[OUTPUT][0] = depth + 8;
+            types[OUTPUT][0] = CV_MAKETYPE(depth, 2);
             sizes[TEMP][0] = size;
         }
         sizes[INPUT][0] = sizes[INPUT][1] = size;
@@ -592,11 +599,11 @@ void CxCore_DXTBaseTest::get_test_array_types_and_sizes( int test_case_idx,
     }
     else if( /*(cn == 2 && (bits&32)) ||*/ (cn == 1 && allow_complex) )
     {
-        types[TEMP][0] = depth + 8; // CV_??FC2
+        types[TEMP][0] = CV_MAKETYPE(depth, 2); // CV_??FC2
         sizes[TEMP][0] = size;
-        size = cvSize(size.width/2+1, size.height);
+        size = cv::Size(size.width/2+1, size.height);
 
-        if( flags & CV_DXT_INVERSE )
+        if( flags & cv::DFT_INVERSE )
         {
             if( cn == 2 )
             {
@@ -609,7 +616,7 @@ void CxCore_DXTBaseTest::get_test_array_types_and_sizes( int test_case_idx,
         else
         {
             if( allow_complex )
-                types[OUTPUT][0] = depth + 8;
+                types[OUTPUT][0] = CV_MAKETYPE(depth, 2);
 
             if( cn == 2 )
             {
@@ -652,7 +659,7 @@ int CxCore_DXTBaseTest::prepare_test_case( int test_case_idx )
         int out_type = test_mat[OUTPUT][0].type();
 
         if( CV_MAT_CN(in_type) == 2 && CV_MAT_CN(out_type) == 1 )
-            cvtest::fixCCS( test_mat[INPUT][0], test_mat[OUTPUT][0].cols, flags );
+            fixCCS( test_mat[INPUT][0], test_mat[OUTPUT][0].cols, flags );
 
         if( inplace )
             cvtest::copy( test_mat[INPUT][test_case_idx & (int)spectrum_mode],
@@ -673,23 +680,36 @@ public:
 protected:
     void run_func();
     void prepare_to_validation( int test_case_idx );
+    double get_success_error_level( int test_case_idx, int i, int j );
 };
-
 
 CxCore_DFTTest::CxCore_DFTTest() : CxCore_DXTBaseTest( true, true, false )
 {
 }
 
+double CxCore_DFTTest::get_success_error_level( int test_case_idx, int i, int j )
+{
+    CV_Assert(i == OUTPUT);
+    CV_Assert(j == 0);
+
+    int depth = test_mat[i][j].depth();
+
+    // NOTE: non-default threshold intorduced for ARMPL integration
+    if (depth == CV_32F)
+        return 1.5e-4;
+
+    return CxCore_DXTBaseTest::get_success_error_level(test_case_idx, i, j);
+}
 
 void CxCore_DFTTest::run_func()
 {
     Mat& dst = temp_dst ? test_mat[TEMP][1] : test_mat[OUTPUT][0];
     const Mat& src = inplace ? dst : test_mat[INPUT][0];
 
-    if(!(flags & CV_DXT_INVERSE))
+    if(!(flags & cv::DFT_INVERSE))
         cv::dft( src, dst, flags );
     else
-        cv::idft(src, dst, flags & ~CV_DXT_INVERSE);
+        cv::idft(src, dst, flags & ~cv::DFT_INVERSE);
 }
 
 
@@ -706,25 +726,25 @@ void CxCore_DFTTest::prepare_to_validation( int /*test_case_idx*/ )
     {
         tmp_src = &test_mat[TEMP][0];
 
-        if( !(flags & CV_DXT_INVERSE ) )
+        if( !(flags & cv::DFT_INVERSE ) )
         {
             Mat& cvdft_dst = test_mat[TEMP][1];
-            cvtest::convertFromCCS( cvdft_dst, cvdft_dst,
-                               test_mat[OUTPUT][0], flags );
+            convertFromCCS( cvdft_dst, cvdft_dst,
+                            test_mat[OUTPUT][0], flags );
             *tmp_src = Scalar::all(0);
             cvtest::insert( src, *tmp_src, 0 );
         }
         else
         {
-            cvtest::convertFromCCS( src, src, *tmp_src, flags );
+            convertFromCCS( src, src, *tmp_src, flags );
             tmp_dst = &test_mat[TEMP][1];
         }
     }
 
-    if( src.rows == 1 || (src.cols == 1 && !(flags & CV_DXT_ROWS)) )
-        cvtest::DFT_1D( *tmp_src, *tmp_dst, flags );
+    if( src.rows == 1 || (src.cols == 1 && !(flags & cv::DFT_ROWS)) )
+        DFT_1D( *tmp_src, *tmp_dst, flags );
     else
-        cvtest::DFT_2D( *tmp_src, *tmp_dst, flags );
+        DFT_2D( *tmp_src, *tmp_dst, flags );
 
     if( tmp_dst != &dst )
         cvtest::extract( *tmp_dst, dst, 0 );
@@ -738,6 +758,9 @@ public:
 protected:
     void run_func();
     void prepare_to_validation( int test_case_idx );
+#if defined(HAVE_ARMPL)
+    double get_success_error_level( int test_case_idx, int i, int j ) CV_OVERRIDE;
+#endif
 };
 
 
@@ -745,16 +768,30 @@ CxCore_DCTTest::CxCore_DCTTest() : CxCore_DXTBaseTest( false, false, false )
 {
 }
 
+#if defined(HAVE_ARMPL)
+double CxCore_DCTTest::get_success_error_level(int, int i, int j)
+{
+    CV_Assert(i == OUTPUT);
+    CV_Assert(j == 0);
+
+    int depth = test_mat[i][j].depth();
+
+    if (depth == CV_32F)
+        return 1.67e-5;
+
+    return 1e-12;
+}
+#endif
 
 void CxCore_DCTTest::run_func()
 {
     Mat& dst = test_mat[OUTPUT][0];
     const Mat& src = inplace ? dst : test_mat[INPUT][0];
 
-    if(!(flags & CV_DXT_INVERSE))
+    if(!(flags & cv::DFT_INVERSE))
         cv::dct( src, dst, flags );
     else
-        cv::idct( src, dst, flags & ~CV_DXT_INVERSE);
+        cv::idct( src, dst, flags & ~cv::DFT_INVERSE);
 }
 
 
@@ -763,10 +800,10 @@ void CxCore_DCTTest::prepare_to_validation( int /*test_case_idx*/ )
     const Mat& src = test_mat[INPUT][0];
     Mat& dst = test_mat[REF_OUTPUT][0];
 
-    if( src.rows == 1 || (src.cols == 1 && !(flags & CV_DXT_ROWS)) )
-        cvtest::DCT_1D( src, dst, flags );
+    if( src.rows == 1 || (src.cols == 1 && !(flags & cv::DFT_ROWS)) )
+        DCT_1D( src, dst, flags );
     else
-        cvtest::DCT_2D( src, dst, flags );
+        DCT_2D( src, dst, flags );
 }
 
 
@@ -778,6 +815,7 @@ public:
 protected:
     void run_func();
     void prepare_to_validation( int test_case_idx );
+    double get_success_error_level( int test_case_idx, int i, int j );
 };
 
 
@@ -785,12 +823,25 @@ CxCore_MulSpectrumsTest::CxCore_MulSpectrumsTest() : CxCore_DXTBaseTest( true, t
 {
 }
 
+double CxCore_MulSpectrumsTest::get_success_error_level( int test_case_idx, int i, int j )
+{
+    CV_UNUSED(test_case_idx);
+    CV_Assert(i == OUTPUT);
+    CV_Assert(j == 0);
+    const int elem_depth = test_mat[i][j].depth();
+    CV_Assert(elem_depth == CV_32F || elem_depth == CV_64F);
+
+    element_wise_relative_error = false;
+    double maxInputValue = 1000; // ArrayTest::get_minmax_bounds
+    double err = 8 * maxInputValue;  // result = A*B + C*D
+    return (elem_depth == CV_32F ? FLT_EPSILON : DBL_EPSILON) * err;
+}
 
 void CxCore_MulSpectrumsTest::run_func()
 {
     Mat& dst = !test_mat[TEMP].empty() && !test_mat[TEMP][0].empty() ?
         test_mat[TEMP][0] : test_mat[OUTPUT][0];
-    const Mat* src1 = &test_mat[INPUT][0], *src2 = &test_mat[INPUT][1];
+    Mat *src1 = &test_mat[INPUT][0], *src2 = &test_mat[INPUT][1];
 
     if( inplace )
     {
@@ -800,7 +851,7 @@ void CxCore_MulSpectrumsTest::run_func()
             src1 = &dst;
     }
 
-    cv::mulSpectrums( *src1, *src2, dst, flags, (flags & CV_DXT_MUL_CONJ) != 0 );
+    cv::mulSpectrums( *src1, *src2, dst, flags, (flags & CV_TEST_DXT_MUL_CONJ) != 0 );
 }
 
 
@@ -814,23 +865,297 @@ void CxCore_MulSpectrumsTest::prepare_to_validation( int /*test_case_idx*/ )
 
     if( cn == 1 )
     {
-        cvtest::convertFromCCS( *src1, *src1, dst, flags );
-        cvtest::convertFromCCS( *src2, *src2, dst0, flags );
+        convertFromCCS( *src1, *src1, dst, flags );
+        convertFromCCS( *src2, *src2, dst0, flags );
         src1 = &dst;
         src2 = &dst0;
     }
 
-    cvtest::mulComplex( *src1, *src2, dst0, flags );
+    mulComplex( *src1, *src2, dst0, flags );
     if( cn == 1 )
     {
         Mat& temp = test_mat[TEMP][0];
-        cvtest::convertFromCCS( temp, temp, dst, flags );
+        convertFromCCS( temp, temp, dst, flags );
+    }
+}
+
+////////////////////// DivSpectrums ////////////////////////
+class CV_DivSpectrumsTest : public cvtest::ArrayTest
+{
+public:
+    CV_DivSpectrumsTest();
+protected:
+    void run_func();
+    void get_test_array_types_and_sizes( int, vector<vector<Size> >& sizes, vector<vector<int> >& types );
+    void prepare_to_validation( int test_case_idx );
+    int flags;
+};
+
+
+CV_DivSpectrumsTest::CV_DivSpectrumsTest() : flags(0)
+{
+    // Allocate test matrices.
+    test_array[INPUT].push_back(NULL);  // first input DFT as a CCS-packed array or complex matrix.
+    test_array[INPUT].push_back(NULL);  // second input DFT as a CCS-packed array or complex matrix.
+    test_array[OUTPUT].push_back(NULL);  // output DFT as a complex matrix.
+    test_array[REF_OUTPUT].push_back(NULL);  // reference output DFT as a complex matrix.
+    test_array[TEMP].push_back(NULL);  // first input DFT converted to a complex matrix.
+    test_array[TEMP].push_back(NULL);  // second input DFT converted to a complex matrix.
+    test_array[TEMP].push_back(NULL);  // output DFT as a CCV-packed array.
+}
+
+void CV_DivSpectrumsTest::get_test_array_types_and_sizes( int test_case_idx, vector<vector<Size> >& sizes, vector<vector<int> >& types )
+{
+    cvtest::ArrayTest::get_test_array_types_and_sizes(test_case_idx, sizes, types);
+    RNG& rng = ts->get_rng();
+
+    // Get the flag of the input.
+    const int rand_int_flags = cvtest::randInt(rng);
+    flags = rand_int_flags & (CV_TEST_DXT_MUL_CONJ | DFT_ROWS);
+
+    // Get input type.
+    const int rand_int_type = cvtest::randInt(rng);
+    int type;
+
+    if (rand_int_type % 4)
+    {
+        type = CV_32FC1;
+    }
+    else if (rand_int_type % 4 == 1)
+    {
+        type = CV_32FC2;
+    }
+    else if (rand_int_type % 4 == 2)
+    {
+        type = CV_64FC1;
+    }
+    else
+    {
+        type = CV_64FC2;
+    }
+
+    for( size_t i = 0; i < types.size(); i++ )
+    {
+        for( size_t j = 0; j < types[i].size(); j++ )
+        {
+            types[i][j] = type;
+        }
+    }
+
+    // Inputs are CCS-packed arrays.  Prepare outputs and temporary inputs as complex matrices.
+    if( type == CV_32FC1 || type == CV_64FC1 )
+    {
+        types[OUTPUT][0] += CV_DEPTH_MAX;
+        types[REF_OUTPUT][0] += CV_DEPTH_MAX;
+        types[TEMP][0] += CV_DEPTH_MAX;
+        types[TEMP][1] += CV_DEPTH_MAX;
+    }
+}
+
+/// Helper function to convert a ccs array of depth_t into a complex matrix.
+template<typename depth_t>
+static void convert_from_ccs_helper( const Mat& src0, const Mat& src1, Mat& dst )
+{
+    const int cn = src0.channels();
+    int srcstep = cn;
+    int dststep = 1;
+
+    if( !dst.isContinuous() )
+        dststep = (int)(dst.step/dst.elemSize());
+
+    if( !src0.isContinuous() )
+        srcstep = (int)(src0.step/src0.elemSize1());
+
+    Complex<depth_t> *dst_data = dst.ptr<Complex<depth_t> >();
+    const depth_t* src0_data = src0.ptr<depth_t>();
+    const depth_t* src1_data = src1.ptr<depth_t>();
+    dst_data->re = src0_data[0];
+    dst_data->im = 0;
+    const int n = dst.cols + dst.rows - 1;
+    const int n2 = (n+1) >> 1;
+
+    if( (n & 1) == 0 )
+    {
+        dst_data[n2*dststep].re = src0_data[(cn == 1 ? n-1 : n2)*srcstep];
+        dst_data[n2*dststep].im = 0;
+    }
+
+    int delta0 = srcstep;
+    int delta1 = delta0 + (cn == 1 ? srcstep : 1);
+
+    if( cn == 1 )
+        srcstep *= 2;
+
+    for( int i = 1; i < n2; i++, delta0 += srcstep, delta1 += srcstep )
+    {
+        depth_t t0 = src0_data[delta0];
+        depth_t t1 = src0_data[delta1];
+
+        dst_data[i*dststep].re = t0;
+        dst_data[i*dststep].im = t1;
+
+        t0 = src1_data[delta0];
+        t1 = -src1_data[delta1];
+
+        dst_data[(n-i)*dststep].re = t0;
+        dst_data[(n-i)*dststep].im = t1;
+    }
+}
+
+/// Helper function to convert a ccs array into a complex matrix.
+static void convert_from_ccs( const Mat& src0, const Mat& src1, Mat& dst, const int flags )
+{
+    if( dst.rows > 1 && (dst.cols > 1 || (flags & DFT_ROWS)) )
+    {
+        const int count = dst.rows;
+        const int len = dst.cols;
+        const bool is2d = (flags & DFT_ROWS) == 0;
+        for( int i = 0; i < count; i++ )
+        {
+            const int j = !is2d || i == 0 ? i : count - i;
+            const Mat& src0row = src0.row(i);
+            const Mat& src1row = src1.row(j);
+            Mat dstrow = dst.row(i);
+            convert_from_ccs( src0row, src1row, dstrow, 0 );
+        }
+
+        if( is2d )
+        {
+            const Mat& src0row = src0.col(0);
+            Mat dstrow = dst.col(0);
+            convert_from_ccs( src0row, src0row, dstrow, 0 );
+
+            if( (len & 1) == 0 )
+            {
+                const Mat& src0row_even = src0.col(src0.cols - 1);
+                Mat dstrow_even = dst.col(len/2);
+                convert_from_ccs( src0row_even, src0row_even, dstrow_even, 0 );
+            }
+        }
+    }
+    else
+    {
+        if( dst.depth() == CV_32F )
+        {
+            convert_from_ccs_helper<float>( src0, src1, dst );
+        }
+        else
+        {
+            convert_from_ccs_helper<double>( src0, src1, dst );
+        }
+    }
+}
+
+/// Helper function to compute complex number (nu_re + nu_im * i) / (de_re + de_im * i).
+static std::pair<double, double> divide_complex_numbers( const double nu_re, const double nu_im,
+                                                         const double de_re, const double de_im,
+                                                         const bool conj_de )
+{
+    if ( conj_de )
+    {
+        return divide_complex_numbers( nu_re, nu_im, de_re, -de_im, false /* conj_de */ );
+    }
+
+    const double result_de = de_re * de_re + de_im * de_im + DBL_EPSILON;
+    const double result_re = nu_re * de_re + nu_im * de_im;
+    const double result_im = nu_re * (-de_im) + nu_im * de_re;
+    return std::pair<double, double>(result_re / result_de, result_im / result_de);
+}
+
+/// Helper function to divide a DFT in src1 by a DFT in src2 with depths depth_t.  The DFTs are
+/// complex matrices.
+template <typename depth_t>
+static void div_complex_helper( const Mat& src1, const Mat& src2, Mat& dst, int flags )
+{
+    CV_Assert( src1.size == src2.size && src1.type() == src2.type() );
+    dst.create( src1.rows, src1.cols, src1.type() );
+    const int cn = src1.channels();
+    int cols = src1.cols * cn;
+
+    for( int i = 0; i < dst.rows; i++ )
+    {
+        const depth_t *src1_data = src1.ptr<depth_t>(i);
+        const depth_t *src2_data = src2.ptr<depth_t>(i);
+        depth_t *dst_data = dst.ptr<depth_t>(i);
+        for( int j = 0; j < cols; j += 2 )
+        {
+            std::pair<double, double> result =
+            divide_complex_numbers( src1_data[j], src1_data[j + 1],
+                                    src2_data[j], src2_data[j + 1],
+                                    (flags & CV_TEST_DXT_MUL_CONJ) != 0 );
+            dst_data[j] = (depth_t)result.first;
+            dst_data[j + 1] = (depth_t)result.second;
+        }
+    }
+}
+
+/// Helper function to divide a DFT in src1 by a DFT in src2.  The DFTs are complex matrices.
+static void div_complex( const Mat& src1, const Mat& src2, Mat& dst, const int flags )
+{
+    const int type = src1.type();
+    CV_Assert( type == CV_32FC2 || type == CV_64FC2 );
+
+    if ( src1.depth() == CV_32F )
+    {
+        return div_complex_helper<float>( src1, src2, dst, flags );
+    }
+    else
+    {
+        return div_complex_helper<double>( src1, src2, dst, flags );
+    }
+}
+
+void CV_DivSpectrumsTest::prepare_to_validation( int /* test_case_idx */ )
+{
+    Mat &src1 = test_mat[INPUT][0];
+    Mat &src2 = test_mat[INPUT][1];
+    Mat &ref_dst = test_mat[REF_OUTPUT][0];
+    const int cn = src1.channels();
+    // Inputs are CCS-packed arrays.  Convert them to complex matrices and get the expected output
+    // as a complex matrix.
+    if( cn == 1 )
+    {
+        Mat &converted_src1 = test_mat[TEMP][0];
+        Mat &converted_src2 = test_mat[TEMP][1];
+        convert_from_ccs( src1, src1, converted_src1, flags );
+        convert_from_ccs( src2, src2, converted_src2, flags );
+        div_complex( converted_src1, converted_src2, ref_dst, flags );
+    }
+    // Inputs are complex matrices.  Get the expected output as a complex matrix.
+    else
+    {
+        div_complex( src1, src2, ref_dst, flags );
+    }
+}
+
+void CV_DivSpectrumsTest::run_func()
+{
+    const Mat &src1 = test_mat[INPUT][0];
+    const Mat &src2 = test_mat[INPUT][1];
+    const int cn = src1.channels();
+
+    // Inputs are CCS-packed arrays.  Get the output as a CCS-packed array and convert it to a
+    // complex matrix.
+    if ( cn == 1 )
+    {
+        Mat &dst = test_mat[TEMP][2];
+        cv::divSpectrums( src1, src2, dst, flags, (flags & CV_TEST_DXT_MUL_CONJ) != 0 );
+        Mat &converted_dst = test_mat[OUTPUT][0];
+        convert_from_ccs( dst, dst, converted_dst, flags );
+    }
+    // Inputs are complex matrices.  Get the output as a complex matrix.
+    else
+    {
+        Mat &dst = test_mat[OUTPUT][0];
+        cv::divSpectrums( src1, src2, dst, flags, (flags & CV_TEST_DXT_MUL_CONJ) != 0 );
     }
 }
 
 TEST(Core_DCT, accuracy) { CxCore_DCTTest test; test.safe_run(); }
 TEST(Core_DFT, accuracy) { CxCore_DFTTest test; test.safe_run(); }
 TEST(Core_MulSpectrums, accuracy) { CxCore_MulSpectrumsTest test; test.safe_run(); }
+TEST(Core_DivSpectrums, accuracy) { CV_DivSpectrumsTest test; test.safe_run(); }
+
 
 class Core_DFTComplexOutputTest : public cvtest::BaseTest
 {
@@ -855,14 +1180,113 @@ protected:
             merge(mv, 2, srcz);
             dft(srcz, dstz);
             dft(src, dst, DFT_COMPLEX_OUTPUT);
-            if(norm(dst, dstz, NORM_INF) > 1e-3)
+            if (cvtest::norm(dst, dstz, NORM_INF) > 1e-3)
             {
                 cout << "actual:\n" << dst << endl << endl;
                 cout << "reference:\n" << dstz << endl << endl;
-                CV_Error(CV_StsError, "");
+                CV_Error(cv::Error::StsError, "");
             }
         }
     }
 };
 
 TEST(Core_DFT, complex_output) { Core_DFTComplexOutputTest test; test.safe_run(); }
+
+TEST(Core_DFT, complex_output2)
+{
+    for( int i = 0; i < 100; i++ )
+    {
+        int type = theRNG().uniform(0, 2) ? CV_64F : CV_32F;
+        int m = theRNG().uniform(1, 10);
+        int n = theRNG().uniform(1, 10);
+        Mat x(m, n, type), out;
+        randu(x, -1., 1.);
+        dft(x, out, DFT_ROWS | DFT_COMPLEX_OUTPUT);
+        double nrm = cvtest::norm(out, NORM_INF);
+        double thresh = n*m*2;
+        if( nrm > thresh )
+        {
+            cout << "x: " << x << endl;
+            cout << "out: " << out << endl;
+            ASSERT_LT(nrm, thresh);
+        }
+    }
+}
+
+class Core_DXTReverseTest : public cvtest::BaseTest
+{
+public:
+    enum Mode
+    {
+        ModeDFT,
+        ModeDCT
+    };
+    Core_DXTReverseTest(Mode m) : mode(m) {}
+private:
+    Mode mode;
+protected:
+    void run(int)
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            if (mode == ModeDCT && i != 0)
+                continue;
+            int flags = 0;
+            int flags_inv = DFT_INVERSE | DFT_SCALE;
+            int cn_in = 0;
+            int cn_out = 0;
+            switch (i)
+            {
+                case 0: cn_in = 1; cn_out = 1; break;
+                case 1: cn_in = 1; cn_out = 2; flags |= DFT_COMPLEX_OUTPUT; flags_inv |= DFT_REAL_OUTPUT; break;
+                case 2: cn_in = 2; cn_out = 2; break;
+            };
+            for (int j = 0; j < 100; ++j)
+            {
+                RNG& rng = ts->get_rng();
+                int type = rng.uniform(0, 2) ? CV_64F : CV_32F;
+                int m = rng.uniform(1, 10);
+                int n = rng.uniform(1, 10);
+                if (mode == ModeDCT)
+                {
+                    m *= 2;
+                    n *= 2;
+                }
+                Mat one(m, n, CV_MAKETYPE(type, cn_in));
+                cvtest::randUni(rng, one, Scalar::all(-1.), Scalar::all(1.));
+                Mat out;
+                Mat two;
+                if (mode == ModeDFT)
+                {
+                    cv::dft(one, out, flags);
+                    cv::dft(out, two, flags_inv);
+                }
+                else if (mode == ModeDCT)
+                {
+                    cv::dct(one, out, flags);
+                    cv::dct(out, two, flags_inv);
+                }
+                if (out.channels() != cn_out || two.channels() != cn_in || cvtest::norm(one, two, NORM_INF) > 1e-5)
+                {
+                    cout << "Test #" << j + 1 << " - "
+                        << "elements: " << m << " x " << n << ", "
+                        << "channels: "
+                        << one.channels() << " (" << cn_in << ")" << " -> "
+                        << out.channels() << " (" << cn_out << ")" << " -> "
+                        << two.channels() << " (" << cn_in << ")"
+                        << endl;
+                    cout << "signal:\n" << one << endl << endl;
+                    cout << "spectrum:\n" << out << endl << endl;
+                    cout << "inverse:\n" << two << endl << endl;
+                    ts->set_failed_test_info(cvtest::TS::FAIL_INVALID_OUTPUT);
+                    break;
+                }
+            }
+        }
+    }
+};
+
+TEST(Core_DFT, reverse) { Core_DXTReverseTest test(Core_DXTReverseTest::ModeDFT); test.safe_run(); }
+TEST(Core_DCT, reverse) { Core_DXTReverseTest test(Core_DXTReverseTest::ModeDCT); test.safe_run(); }
+
+}} // namespace

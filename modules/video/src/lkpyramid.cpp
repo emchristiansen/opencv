@@ -12,6 +12,7 @@
 //
 // Copyright (C) 2000, Intel Corporation, all rights reserved.
 // Copyright (C) 2013, OpenCV Foundation, all rights reserved.
+// Copyright (C) 2026, Advanced Micro Devices, Inc., all rights reserved.
 // Third party copyrights are property of their respective owners.
 //
 // Redistribution and use in source and binary forms, with or without modification,
@@ -43,99 +44,37 @@
 #include <float.h>
 #include <stdio.h>
 #include "lkpyramid.hpp"
+#include "opencl_kernels_video.hpp"
+#include "opencv2/core/hal/intrin.hpp"
+#ifdef HAVE_OPENCV_GEOMETRY
+#include "opencv2/geometry.hpp"
+#endif
+
+#include "hal_replacement.hpp"
 
 #define  CV_DESCALE(x,n)     (((x) + (1 << ((n)-1))) >> (n))
 
 namespace
 {
-static void calcSharrDeriv(const cv::Mat& src, cv::Mat& dst)
+static void calcScharrDeriv(const cv::Mat& src, cv::Mat& dst)
 {
     using namespace cv;
     using cv::detail::deriv_type;
-    int rows = src.rows, cols = src.cols, cn = src.channels(), colsn = cols*cn, depth = src.depth();
+    int rows = src.rows, cols = src.cols, cn = src.channels(), depth = src.depth();
     CV_Assert(depth == CV_8U);
     dst.create(rows, cols, CV_MAKETYPE(DataType<deriv_type>::depth, cn*2));
 
-#ifdef HAVE_TEGRA_OPTIMIZATION
-    if (tegra::calcSharrDeriv(src, dst))
-        return;
-#endif
+    CALL_HAL(ScharrDeriv, cv_hal_ScharrDeriv, src.data, src.step, (short*)dst.data, dst.step, cols, rows, cn);
 
-    int x, y, delta = (int)alignSize((cols + 2)*cn, 16);
-    AutoBuffer<deriv_type> _tempBuf(delta*2 + 64);
-    deriv_type *trow0 = alignPtr(_tempBuf + cn, 16), *trow1 = alignPtr(trow0 + delta, 16);
-
-#if CV_SSE2
-    __m128i z = _mm_setzero_si128(), c3 = _mm_set1_epi16(3), c10 = _mm_set1_epi16(10);
-#endif
-
-    for( y = 0; y < rows; y++ )
-    {
-        const uchar* srow0 = src.ptr<uchar>(y > 0 ? y-1 : rows > 1 ? 1 : 0);
-        const uchar* srow1 = src.ptr<uchar>(y);
-        const uchar* srow2 = src.ptr<uchar>(y < rows-1 ? y+1 : rows > 1 ? rows-2 : 0);
-        deriv_type* drow = dst.ptr<deriv_type>(y);
-
-        // do vertical convolution
-        x = 0;
-#if CV_SSE2
-        for( ; x <= colsn - 8; x += 8 )
-        {
-            __m128i s0 = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i*)(srow0 + x)), z);
-            __m128i s1 = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i*)(srow1 + x)), z);
-            __m128i s2 = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i*)(srow2 + x)), z);
-            __m128i t0 = _mm_add_epi16(_mm_mullo_epi16(_mm_add_epi16(s0, s2), c3), _mm_mullo_epi16(s1, c10));
-            __m128i t1 = _mm_sub_epi16(s2, s0);
-            _mm_store_si128((__m128i*)(trow0 + x), t0);
-            _mm_store_si128((__m128i*)(trow1 + x), t1);
-        }
-#endif
-        for( ; x < colsn; x++ )
-        {
-            int t0 = (srow0[x] + srow2[x])*3 + srow1[x]*10;
-            int t1 = srow2[x] - srow0[x];
-            trow0[x] = (deriv_type)t0;
-            trow1[x] = (deriv_type)t1;
-        }
-
-        // make border
-        int x0 = (cols > 1 ? 1 : 0)*cn, x1 = (cols > 1 ? cols-2 : 0)*cn;
-        for( int k = 0; k < cn; k++ )
-        {
-            trow0[-cn + k] = trow0[x0 + k]; trow0[colsn + k] = trow0[x1 + k];
-            trow1[-cn + k] = trow1[x0 + k]; trow1[colsn + k] = trow1[x1 + k];
-        }
-
-        // do horizontal convolution, interleave the results and store them to dst
-        x = 0;
-#if CV_SSE2
-        for( ; x <= colsn - 8; x += 8 )
-        {
-            __m128i s0 = _mm_loadu_si128((const __m128i*)(trow0 + x - cn));
-            __m128i s1 = _mm_loadu_si128((const __m128i*)(trow0 + x + cn));
-            __m128i s2 = _mm_loadu_si128((const __m128i*)(trow1 + x - cn));
-            __m128i s3 = _mm_load_si128((const __m128i*)(trow1 + x));
-            __m128i s4 = _mm_loadu_si128((const __m128i*)(trow1 + x + cn));
-
-            __m128i t0 = _mm_sub_epi16(s1, s0);
-            __m128i t1 = _mm_add_epi16(_mm_mullo_epi16(_mm_add_epi16(s2, s4), c3), _mm_mullo_epi16(s3, c10));
-            __m128i t2 = _mm_unpacklo_epi16(t0, t1);
-            t0 = _mm_unpackhi_epi16(t0, t1);
-            // this can probably be replaced with aligned stores if we aligned dst properly.
-            _mm_storeu_si128((__m128i*)(drow + x*2), t2);
-            _mm_storeu_si128((__m128i*)(drow + x*2 + 8), t0);
-        }
-#endif
-        for( ; x < colsn; x++ )
-        {
-            deriv_type t0 = (deriv_type)(trow0[x+cn] - trow0[x-cn]);
-            deriv_type t1 = (deriv_type)((trow1[x+cn] + trow1[x-cn])*3 + trow1[x]*10);
-            drow[x*2] = t0; drow[x*2+1] = t1;
-        }
-    }
+    parallel_for_(Range(0, rows), cv::detail::ScharrDerivInvoker(src, dst), cv::getNumThreads());
 }
 
 }//namespace
+
+void cv::detail::ScharrDerivInvoker::operator()(const Range& range) const
+{
+    ScharrDerivInvoker_impl(src, const_cast<Mat&>(dst), range);
+}
 
 cv::detail::LKTrackerInvoker::LKTrackerInvoker(
                       const Mat& _prevImg, const Mat& _prevDeriv, const Mat& _nextImg,
@@ -169,17 +108,25 @@ typedef float itemtype;
 
 void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
 {
+    CV_INSTRUMENT_REGION();
+
+    const int W_BITS = 14, W_BITS1 = 14;
+    const float FLT_SCALE = 1.f/(1 << 20);
+
     Point2f halfWin((winSize.width-1)*0.5f, (winSize.height-1)*0.5f);
     const Mat& I = *prevImg;
     const Mat& J = *nextImg;
     const Mat& derivI = *prevDeriv;
 
+    cv::AutoBuffer<Point2f> prevPtsScaledData(range.end - range.start);
+    Point2f* prevPtsScaled = prevPtsScaledData.data();
+
     int j, cn = I.channels(), cn2 = cn*2;
     cv::AutoBuffer<deriv_type> _buf(winSize.area()*(cn + cn2));
     int derivDepth = DataType<deriv_type>::depth;
 
-    Mat IWinBuf(winSize, CV_MAKETYPE(derivDepth, cn), (deriv_type*)_buf);
-    Mat derivIWinBuf(winSize, CV_MAKETYPE(derivDepth, cn2), (deriv_type*)_buf + winSize.area()*cn);
+    Mat IWinBuf(winSize, CV_MAKETYPE(derivDepth, cn), _buf.data());
+    Mat derivIWinBuf(winSize, CV_MAKETYPE(derivDepth, cn2), _buf.data() + winSize.area()*cn);
 
     for( int ptidx = range.start; ptidx < range.end; ptidx++ )
     {
@@ -195,7 +142,23 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
         else
             nextPt = nextPts[ptidx]*2.f;
         nextPts[ptidx] = nextPt;
+        prevPtsScaled[ptidx-range.start] = prevPt;
+    }
 
+    CALL_HAL(LKOpticalFlowLevel, cv_hal_LKOpticalFlowLevel,
+        I.data, I.step, (const short*)derivI.data, derivI.step, J.data, J.step,
+        I.cols, I.rows, I.channels(),
+        (float*)prevPtsScaled, (float*)(nextPts+range.start), range.end-range.start,
+        (level == 0) ? status+range.start: nullptr,
+        err != nullptr ? err+range.start: nullptr,
+        winSize.width, winSize.height, criteria.maxCount, criteria.epsilon,
+        (flags & OPTFLOW_LK_GET_MIN_EIGENVALS) != 0,
+        (float)minEigThreshold
+    );
+
+    for( int ptidx = range.start; ptidx < range.end; ptidx++ )
+    {
+        Point2f prevPt = prevPtsScaled[ptidx-range.start];
         Point2i iprevPt, inextPt;
         prevPt -= halfWin;
         iprevPt.x = cvFloor(prevPt.x);
@@ -206,8 +169,7 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
         {
             if( level == 0 )
             {
-                if( status )
-                    status[ptidx] = false;
+                status[ptidx] = false;
                 if( err )
                     err[ptidx] = 0;
             }
@@ -216,8 +178,6 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
 
         float a = prevPt.x - iprevPt.x;
         float b = prevPt.y - iprevPt.y;
-        const int W_BITS = 14, W_BITS1 = 14;
-        const float FLT_SCALE = 1.f/(1 << 20);
         int iw00 = cvRound((1.f - a)*(1.f - b)*(1 << W_BITS));
         int iw01 = cvRound(a*(1.f - b)*(1 << W_BITS));
         int iw10 = cvRound((1.f - a)*b*(1 << W_BITS));
@@ -229,65 +189,290 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
         acctype iA11 = 0, iA12 = 0, iA22 = 0;
         float A11, A12, A22;
 
-#if CV_SSE2
-        __m128i qw0 = _mm_set1_epi32(iw00 + (iw01 << 16));
-        __m128i qw1 = _mm_set1_epi32(iw10 + (iw11 << 16));
-        __m128i z = _mm_setzero_si128();
-        __m128i qdelta_d = _mm_set1_epi32(1 << (W_BITS1-1));
-        __m128i qdelta = _mm_set1_epi32(1 << (W_BITS1-5-1));
-        __m128 qA11 = _mm_setzero_ps(), qA12 = _mm_setzero_ps(), qA22 = _mm_setzero_ps();
+#if CV_SIMD128 && !CV_NEON
+        v_int16x8 qw0((short)(iw00), (short)(iw01), (short)(iw00), (short)(iw01), (short)(iw00), (short)(iw01), (short)(iw00), (short)(iw01));
+        v_int16x8 qw1((short)(iw10), (short)(iw11), (short)(iw10), (short)(iw11), (short)(iw10), (short)(iw11), (short)(iw10), (short)(iw11));
+        v_int32x4 qdelta_d = v_setall_s32(1 << (W_BITS1-1));
+        v_int32x4 qdelta = v_setall_s32(1 << (W_BITS1-5-1));
+        v_float32x4 qA11 = v_setzero_f32(), qA12 = v_setzero_f32(), qA22 = v_setzero_f32();
+#endif
+
+#if CV_NEON
+
+        float CV_DECL_ALIGNED(16) nA11[] = { 0, 0, 0, 0 }, nA12[] = { 0, 0, 0, 0 }, nA22[] = { 0, 0, 0, 0 };
+        const int shifter1 = -(W_BITS - 5); //negative so it shifts right
+        const int shifter2 = -(W_BITS);
+
+        const int16x4_t d26 = vdup_n_s16((int16_t)iw00);
+        const int16x4_t d27 = vdup_n_s16((int16_t)iw01);
+        const int16x4_t d28 = vdup_n_s16((int16_t)iw10);
+        const int16x4_t d29 = vdup_n_s16((int16_t)iw11);
+        const int32x4_t q11 = vdupq_n_s32((int32_t)shifter1);
+        const int32x4_t q12 = vdupq_n_s32((int32_t)shifter2);
+
+#elif CV_RVV
+        const size_t rvv_lanes_A = __riscv_vsetvlmax_e16m1();
+        vfloat32m2_t rvvA11 = __riscv_vfmv_v_f_f32m2(0.f, rvv_lanes_A);
+        vfloat32m2_t rvvA12 = __riscv_vfmv_v_f_f32m2(0.f, rvv_lanes_A);
+        vfloat32m2_t rvvA22 = __riscv_vfmv_v_f_f32m2(0.f, rvv_lanes_A);
+
 #endif
 
         // extract the patch from the first image, compute covariation matrix of derivatives
         int x, y;
         for( y = 0; y < winSize.height; y++ )
         {
-            const uchar* src = (const uchar*)I.data + (y + iprevPt.y)*stepI + iprevPt.x*cn;
-            const deriv_type* dsrc = (const deriv_type*)derivI.data + (y + iprevPt.y)*dstep + iprevPt.x*cn2;
+            const uchar* src = I.ptr() + (y + iprevPt.y)*stepI + iprevPt.x*cn;
+            const deriv_type* dsrc = derivI.ptr<deriv_type>() + (y + iprevPt.y)*dstep + iprevPt.x*cn2;
 
-            deriv_type* Iptr = (deriv_type*)(IWinBuf.data + y*IWinBuf.step);
-            deriv_type* dIptr = (deriv_type*)(derivIWinBuf.data + y*derivIWinBuf.step);
+            deriv_type* Iptr = IWinBuf.ptr<deriv_type>(y);
+            deriv_type* dIptr = derivIWinBuf.ptr<deriv_type>(y);
 
             x = 0;
 
-#if CV_SSE2
+#if CV_SIMD128 && !CV_NEON
+            for( ; x <= winSize.width*cn - 8; x += 8, dsrc += 8*2, dIptr += 8*2 )
+            {
+                v_int32x4 t0, t1;
+                v_int16x8 v00, v01, v10, v11, t00, t01, t10, t11;
+
+                v00 = v_reinterpret_as_s16(v_load_expand(src + x));
+                v01 = v_reinterpret_as_s16(v_load_expand(src + x + cn));
+                v10 = v_reinterpret_as_s16(v_load_expand(src + x + stepI));
+                v11 = v_reinterpret_as_s16(v_load_expand(src + x + stepI + cn));
+
+                v_zip(v00, v01, t00, t01);
+                v_zip(v10, v11, t10, t11);
+
+                t0 = v_add(v_dotprod(t00, qw0, qdelta), v_dotprod(t10, qw1));
+                t1 = v_add(v_dotprod(t01, qw0, qdelta), v_dotprod(t11, qw1));
+                t0 = v_shr<W_BITS1 - 5>(t0);
+                t1 = v_shr<W_BITS1 - 5>(t1);
+                v_store(Iptr + x, v_pack(t0, t1));
+
+                v00 = v_reinterpret_as_s16(v_load(dsrc));
+                v01 = v_reinterpret_as_s16(v_load(dsrc + cn2));
+                v10 = v_reinterpret_as_s16(v_load(dsrc + dstep));
+                v11 = v_reinterpret_as_s16(v_load(dsrc + dstep + cn2));
+
+                v_zip(v00, v01, t00, t01);
+                v_zip(v10, v11, t10, t11);
+
+                t0 = v_add(v_dotprod(t00, qw0, qdelta_d), v_dotprod(t10, qw1));
+                t1 = v_add(v_dotprod(t01, qw0, qdelta_d), v_dotprod(t11, qw1));
+                t0 = v_shr<W_BITS1>(t0);
+                t1 = v_shr<W_BITS1>(t1);
+                v00 = v_pack(t0, t1); // Ix0 Iy0 Ix1 Iy1 ...
+                v_store(dIptr, v00);
+
+                v00 = v_reinterpret_as_s16(v_interleave_pairs(v_reinterpret_as_s32(v_interleave_pairs(v00))));
+                v_expand(v00, t1, t0);
+
+                v_float32x4 fy = v_cvt_f32(t0);
+                v_float32x4 fx = v_cvt_f32(t1);
+
+                qA22 = v_muladd(fy, fy, qA22);
+                qA12 = v_muladd(fx, fy, qA12);
+                qA11 = v_muladd(fx, fx, qA11);
+
+                v00 = v_reinterpret_as_s16(v_load(dsrc + 4*2));
+                v01 = v_reinterpret_as_s16(v_load(dsrc + 4*2 + cn2));
+                v10 = v_reinterpret_as_s16(v_load(dsrc + 4*2 + dstep));
+                v11 = v_reinterpret_as_s16(v_load(dsrc + 4*2 + dstep + cn2));
+
+                v_zip(v00, v01, t00, t01);
+                v_zip(v10, v11, t10, t11);
+
+                t0 = v_add(v_dotprod(t00, qw0, qdelta_d), v_dotprod(t10, qw1));
+                t1 = v_add(v_dotprod(t01, qw0, qdelta_d), v_dotprod(t11, qw1));
+                t0 = v_shr<W_BITS1>(t0);
+                t1 = v_shr<W_BITS1>(t1);
+                v00 = v_pack(t0, t1); // Ix0 Iy0 Ix1 Iy1 ...
+                v_store(dIptr + 4*2, v00);
+
+                v00 = v_reinterpret_as_s16(v_interleave_pairs(v_reinterpret_as_s32(v_interleave_pairs(v00))));
+                v_expand(v00, t1, t0);
+
+                fy = v_cvt_f32(t0);
+                fx = v_cvt_f32(t1);
+
+                qA22 = v_muladd(fy, fy, qA22);
+                qA12 = v_muladd(fx, fy, qA12);
+                qA11 = v_muladd(fx, fx, qA11);
+            }
+#endif
+
+#if CV_NEON
             for( ; x <= winSize.width*cn - 4; x += 4, dsrc += 4*2, dIptr += 4*2 )
             {
-                __m128i v00, v01, v10, v11, t0, t1;
 
-                v00 = _mm_unpacklo_epi8(_mm_cvtsi32_si128(*(const int*)(src + x)), z);
-                v01 = _mm_unpacklo_epi8(_mm_cvtsi32_si128(*(const int*)(src + x + cn)), z);
-                v10 = _mm_unpacklo_epi8(_mm_cvtsi32_si128(*(const int*)(src + x + stepI)), z);
-                v11 = _mm_unpacklo_epi8(_mm_cvtsi32_si128(*(const int*)(src + x + stepI + cn)), z);
+                uint8x8_t d0 = vld1_u8(&src[x]);
+                uint8x8_t d2 = vld1_u8(&src[x+cn]);
+                uint16x8_t q0 = vmovl_u8(d0);
+                uint16x8_t q1 = vmovl_u8(d2);
 
-                t0 = _mm_add_epi32(_mm_madd_epi16(_mm_unpacklo_epi16(v00, v01), qw0),
-                                   _mm_madd_epi16(_mm_unpacklo_epi16(v10, v11), qw1));
-                t0 = _mm_srai_epi32(_mm_add_epi32(t0, qdelta), W_BITS1-5);
-                _mm_storel_epi64((__m128i*)(Iptr + x), _mm_packs_epi32(t0,t0));
+                int32x4_t q5 = vmull_s16(vget_low_s16(vreinterpretq_s16_u16(q0)), d26);
+                int32x4_t q6 = vmull_s16(vget_low_s16(vreinterpretq_s16_u16(q1)), d27);
 
-                v00 = _mm_loadu_si128((const __m128i*)(dsrc));
-                v01 = _mm_loadu_si128((const __m128i*)(dsrc + cn2));
-                v10 = _mm_loadu_si128((const __m128i*)(dsrc + dstep));
-                v11 = _mm_loadu_si128((const __m128i*)(dsrc + dstep + cn2));
+                uint8x8_t d4 = vld1_u8(&src[x + stepI]);
+                uint8x8_t d6 = vld1_u8(&src[x + stepI + cn]);
+                uint16x8_t q2 = vmovl_u8(d4);
+                uint16x8_t q3 = vmovl_u8(d6);
 
-                t0 = _mm_add_epi32(_mm_madd_epi16(_mm_unpacklo_epi16(v00, v01), qw0),
-                                   _mm_madd_epi16(_mm_unpacklo_epi16(v10, v11), qw1));
-                t1 = _mm_add_epi32(_mm_madd_epi16(_mm_unpackhi_epi16(v00, v01), qw0),
-                                   _mm_madd_epi16(_mm_unpackhi_epi16(v10, v11), qw1));
-                t0 = _mm_srai_epi32(_mm_add_epi32(t0, qdelta_d), W_BITS1);
-                t1 = _mm_srai_epi32(_mm_add_epi32(t1, qdelta_d), W_BITS1);
-                v00 = _mm_packs_epi32(t0, t1); // Ix0 Iy0 Ix1 Iy1 ...
+                int32x4_t q7 = vmull_s16(vget_low_s16(vreinterpretq_s16_u16(q2)), d28);
+                int32x4_t q8 = vmull_s16(vget_low_s16(vreinterpretq_s16_u16(q3)), d29);
 
-                _mm_storeu_si128((__m128i*)dIptr, v00);
-                t0 = _mm_srai_epi32(v00, 16); // Iy0 Iy1 Iy2 Iy3
-                t1 = _mm_srai_epi32(_mm_slli_epi32(v00, 16), 16); // Ix0 Ix1 Ix2 Ix3
+                q5 = vaddq_s32(q5, q6);
+                q7 = vaddq_s32(q7, q8);
+                q5 = vaddq_s32(q5, q7);
 
-                __m128 fy = _mm_cvtepi32_ps(t0);
-                __m128 fx = _mm_cvtepi32_ps(t1);
+                int16x4x2_t d0d1 = vld2_s16(dsrc);
+                int16x4x2_t d2d3 = vld2_s16(&dsrc[cn2]);
 
-                qA22 = _mm_add_ps(qA22, _mm_mul_ps(fy, fy));
-                qA12 = _mm_add_ps(qA12, _mm_mul_ps(fx, fy));
-                qA11 = _mm_add_ps(qA11, _mm_mul_ps(fx, fx));
+                q5 = vqrshlq_s32(q5, q11);
+
+                int32x4_t q4 = vmull_s16(d0d1.val[0], d26);
+                q6 = vmull_s16(d0d1.val[1], d26);
+
+                int16x4_t nd0 = vmovn_s32(q5);
+
+                q7 = vmull_s16(d2d3.val[0], d27);
+                q8 = vmull_s16(d2d3.val[1], d27);
+
+                vst1_s16(&Iptr[x], nd0);
+
+                int16x4x2_t d4d5 = vld2_s16(&dsrc[dstep]);
+                int16x4x2_t d6d7 = vld2_s16(&dsrc[dstep+cn2]);
+
+                q4 = vaddq_s32(q4, q7);
+                q6 = vaddq_s32(q6, q8);
+
+                q7 = vmull_s16(d4d5.val[0], d28);
+                int32x4_t q14 = vmull_s16(d4d5.val[1], d28);
+                q8 = vmull_s16(d6d7.val[0], d29);
+                int32x4_t q15 = vmull_s16(d6d7.val[1], d29);
+
+                q7 = vaddq_s32(q7, q8);
+                q14 = vaddq_s32(q14, q15);
+
+                q4 = vaddq_s32(q4, q7);
+                q6 = vaddq_s32(q6, q14);
+
+                float32x4_t nq0 = vld1q_f32(nA11);
+                float32x4_t nq1 = vld1q_f32(nA12);
+                float32x4_t nq2 = vld1q_f32(nA22);
+
+                q4 = vqrshlq_s32(q4, q12);
+                q6 = vqrshlq_s32(q6, q12);
+
+                q7 = vmulq_s32(q4, q4);
+                q8 = vmulq_s32(q4, q6);
+                q15 = vmulq_s32(q6, q6);
+
+                nq0 = vaddq_f32(nq0, vcvtq_f32_s32(q7));
+                nq1 = vaddq_f32(nq1, vcvtq_f32_s32(q8));
+                nq2 = vaddq_f32(nq2, vcvtq_f32_s32(q15));
+
+                vst1q_f32(nA11, nq0);
+                vst1q_f32(nA12, nq1);
+                vst1q_f32(nA22, nq2);
+
+                int16x4_t d8 = vmovn_s32(q4);
+                int16x4_t d12 = vmovn_s32(q6);
+
+                int16x4x2_t d8d12;
+                d8d12.val[0] = d8; d8d12.val[1] = d12;
+                vst2_s16(dIptr, d8d12);
+            }
+#elif CV_RVV
+            for( ; x < winSize.width*cn; )
+            {
+                const size_t vl = __riscv_vsetvl_e16m1(winSize.width*cn - x);
+
+                // Bilinear interpolation of the source image. Keep only one widened
+                // pixel vector live at a time to limit vector register pressure.
+                vuint16m1_t pix = __riscv_vwcvtu_x_x_v_u16m1(
+                        __riscv_vle8_v_u8mf2(src + x, vl), vl);
+                vint32m2_t interp = __riscv_vwmul_vx_i32m2(
+                        __riscv_vreinterpret_i16m1(pix), (int16_t)iw00, vl);
+
+                pix = __riscv_vwcvtu_x_x_v_u16m1(
+                        __riscv_vle8_v_u8mf2(src + x + cn, vl), vl);
+                interp = __riscv_vwmacc_vx_i32m2(
+                        interp, (int16_t)iw01, __riscv_vreinterpret_i16m1(pix), vl);
+
+                pix = __riscv_vwcvtu_x_x_v_u16m1(
+                        __riscv_vle8_v_u8mf2(src + x + stepI, vl), vl);
+                interp = __riscv_vwmacc_vx_i32m2(
+                        interp, (int16_t)iw10, __riscv_vreinterpret_i16m1(pix), vl);
+
+                pix = __riscv_vwcvtu_x_x_v_u16m1(
+                        __riscv_vle8_v_u8mf2(src + x + stepI + cn, vl), vl);
+                interp = __riscv_vwmacc_vx_i32m2(
+                        interp, (int16_t)iw11, __riscv_vreinterpret_i16m1(pix), vl);
+
+                interp = __riscv_vsra_vx_i32m2(
+                        __riscv_vadd_vx_i32m2(
+                                interp, 1 << (W_BITS1 - 5 - 1), vl),
+                        W_BITS1 - 5, vl);
+                __riscv_vse16_v_i16m1(
+                        Iptr + x, __riscv_vncvt_x_x_w_i16m1(interp, vl), vl);
+
+                // Interpolate Ix/Iy together. m1 inputs widen to m2 accumulators;
+                // reusing the segment-load temporaries keeps the live register set small.
+                vint16m1x2_t grad = __riscv_vlseg2e16_v_i16m1x2(dsrc, vl);
+                vint16m1_t gx = __riscv_vget_v_i16m1x2_i16m1(grad, 0);
+                vint16m1_t gy = __riscv_vget_v_i16m1x2_i16m1(grad, 1);
+                vint32m2_t ix = __riscv_vwmul_vx_i32m2(gx, (int16_t)iw00, vl);
+                vint32m2_t iy = __riscv_vwmul_vx_i32m2(gy, (int16_t)iw00, vl);
+
+                grad = __riscv_vlseg2e16_v_i16m1x2(dsrc + cn2, vl);
+                gx = __riscv_vget_v_i16m1x2_i16m1(grad, 0);
+                gy = __riscv_vget_v_i16m1x2_i16m1(grad, 1);
+                ix = __riscv_vwmacc_vx_i32m2(ix, (int16_t)iw01, gx, vl);
+                iy = __riscv_vwmacc_vx_i32m2(iy, (int16_t)iw01, gy, vl);
+
+                grad = __riscv_vlseg2e16_v_i16m1x2(dsrc + dstep, vl);
+                gx = __riscv_vget_v_i16m1x2_i16m1(grad, 0);
+                gy = __riscv_vget_v_i16m1x2_i16m1(grad, 1);
+                ix = __riscv_vwmacc_vx_i32m2(ix, (int16_t)iw10, gx, vl);
+                iy = __riscv_vwmacc_vx_i32m2(iy, (int16_t)iw10, gy, vl);
+
+                grad = __riscv_vlseg2e16_v_i16m1x2(dsrc + dstep + cn2, vl);
+                gx = __riscv_vget_v_i16m1x2_i16m1(grad, 0);
+                gy = __riscv_vget_v_i16m1x2_i16m1(grad, 1);
+                ix = __riscv_vwmacc_vx_i32m2(ix, (int16_t)iw11, gx, vl);
+                iy = __riscv_vwmacc_vx_i32m2(iy, (int16_t)iw11, gy, vl);
+
+                ix = __riscv_vsra_vx_i32m2(
+                        __riscv_vadd_vx_i32m2(ix, 1 << (W_BITS1 - 1), vl),
+                        W_BITS1, vl);
+                iy = __riscv_vsra_vx_i32m2(
+                        __riscv_vadd_vx_i32m2(iy, 1 << (W_BITS1 - 1), vl),
+                        W_BITS1, vl);
+
+                {
+                    vint16m1_t ix16 = __riscv_vncvt_x_x_w_i16m1(ix, vl);
+                    vint16m1_t iy16 = __riscv_vncvt_x_x_w_i16m1(iy, vl);
+                    vint16m1x2_t out =
+                            __riscv_vset_v_i16m1_i16m1x2(grad, 0, ix16);
+                    out = __riscv_vset_v_i16m1_i16m1x2(out, 1, iy16);
+                    __riscv_vsseg2e16_v_i16m1x2(dIptr, out, vl);
+                }
+
+                vint32m2_t prod = __riscv_vmul_vv_i32m2(ix, ix, vl);
+                rvvA11 = __riscv_vfadd_tu(
+                        rvvA11, rvvA11, __riscv_vfcvt_f_x_v_f32m2(prod, vl), vl);
+                prod = __riscv_vmul_vv_i32m2(ix, iy, vl);
+                rvvA12 = __riscv_vfadd_tu(
+                        rvvA12, rvvA12, __riscv_vfcvt_f_x_v_f32m2(prod, vl), vl);
+                prod = __riscv_vmul_vv_i32m2(iy, iy, vl);
+                rvvA22 = __riscv_vfadd_tu(
+                        rvvA22, rvvA22, __riscv_vfcvt_f_x_v_f32m2(prod, vl), vl);
+
+                x += (int)vl;
+                dsrc += vl*2;
+                dIptr += vl*2;
             }
 #endif
 
@@ -310,14 +495,24 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
             }
         }
 
-#if CV_SSE2
-        float CV_DECL_ALIGNED(16) A11buf[4], A12buf[4], A22buf[4];
-        _mm_store_ps(A11buf, qA11);
-        _mm_store_ps(A12buf, qA12);
-        _mm_store_ps(A22buf, qA22);
-        iA11 += A11buf[0] + A11buf[1] + A11buf[2] + A11buf[3];
-        iA12 += A12buf[0] + A12buf[1] + A12buf[2] + A12buf[3];
-        iA22 += A22buf[0] + A22buf[1] + A22buf[2] + A22buf[3];
+#if CV_SIMD128 && !CV_NEON
+        iA11 += v_reduce_sum(qA11);
+        iA12 += v_reduce_sum(qA12);
+        iA22 += v_reduce_sum(qA22);
+#endif
+
+#if CV_NEON
+        iA11 += nA11[0] + nA11[1] + nA11[2] + nA11[3];
+        iA12 += nA12[0] + nA12[1] + nA12[2] + nA12[3];
+        iA22 += nA22[0] + nA22[1] + nA22[2] + nA22[3];
+#elif CV_RVV
+        vfloat32m1_t rvvZeroA = __riscv_vfmv_v_f_f32m1(0.f, 1);
+        iA11 += __riscv_vfmv_f_s_f32m1_f32(
+                __riscv_vfredusum_vs_f32m2_f32m1(rvvA11, rvvZeroA, rvv_lanes_A));
+        iA12 += __riscv_vfmv_f_s_f32m1_f32(
+                __riscv_vfredusum_vs_f32m2_f32m1(rvvA12, rvvZeroA, rvv_lanes_A));
+        iA22 += __riscv_vfmv_f_s_f32m1_f32(
+                __riscv_vfredusum_vs_f32m2_f32m1(rvvA22, rvvZeroA, rvv_lanes_A));
 #endif
 
         A11 = iA11*FLT_SCALE;
@@ -333,14 +528,14 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
 
         if( minEig < minEigThreshold || D < FLT_EPSILON )
         {
-            if( level == 0 && status )
+            if(level == 0)
                 status[ptidx] = false;
             continue;
         }
 
         D = 1.f/D;
 
-        nextPt -= halfWin;
+        Point2f nextPt = nextPts[ptidx] - halfWin;
         Point2f prevDelta;
 
         for( j = 0; j < criteria.maxCount; j++ )
@@ -351,7 +546,7 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
             if( inextPt.x < -winSize.width || inextPt.x >= J.cols ||
                inextPt.y < -winSize.height || inextPt.y >= J.rows )
             {
-                if( level == 0 && status )
+                if( level == 0 )
                     status[ptidx] = false;
                 break;
             }
@@ -364,52 +559,187 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
             iw11 = (1 << W_BITS) - iw00 - iw01 - iw10;
             acctype ib1 = 0, ib2 = 0;
             float b1, b2;
-#if CV_SSE2
-            qw0 = _mm_set1_epi32(iw00 + (iw01 << 16));
-            qw1 = _mm_set1_epi32(iw10 + (iw11 << 16));
-            __m128 qb0 = _mm_setzero_ps(), qb1 = _mm_setzero_ps();
+#if CV_SIMD128 && !CV_NEON
+            qw0 = v_int16x8((short)(iw00), (short)(iw01), (short)(iw00), (short)(iw01), (short)(iw00), (short)(iw01), (short)(iw00), (short)(iw01));
+            qw1 = v_int16x8((short)(iw10), (short)(iw11), (short)(iw10), (short)(iw11), (short)(iw10), (short)(iw11), (short)(iw10), (short)(iw11));
+            v_float32x4 qb0 = v_setzero_f32(), qb1 = v_setzero_f32();
+#endif
+
+#if CV_NEON
+            float CV_DECL_ALIGNED(16) nB1[] = { 0,0,0,0 }, nB2[] = { 0,0,0,0 };
+
+            const int16x4_t d26_2 = vdup_n_s16((int16_t)iw00);
+            const int16x4_t d27_2 = vdup_n_s16((int16_t)iw01);
+            const int16x4_t d28_2 = vdup_n_s16((int16_t)iw10);
+            const int16x4_t d29_2 = vdup_n_s16((int16_t)iw11);
+
+#elif CV_RVV
+            const size_t rvv_lanes = __riscv_vsetvlmax_e16m1();
+            vfloat32m2_t rvvB1 = __riscv_vfmv_v_f_f32m2(0.f, rvv_lanes);
+            vfloat32m2_t rvvB2 = __riscv_vfmv_v_f_f32m2(0.f, rvv_lanes);
 #endif
 
             for( y = 0; y < winSize.height; y++ )
             {
-                const uchar* Jptr = (const uchar*)J.data + (y + inextPt.y)*stepJ + inextPt.x*cn;
-                const deriv_type* Iptr = (const deriv_type*)(IWinBuf.data + y*IWinBuf.step);
-                const deriv_type* dIptr = (const deriv_type*)(derivIWinBuf.data + y*derivIWinBuf.step);
+                const uchar* Jptr = J.ptr() + (y + inextPt.y)*stepJ + inextPt.x*cn;
+                const deriv_type* Iptr = IWinBuf.ptr<deriv_type>(y);
+                const deriv_type* dIptr = derivIWinBuf.ptr<deriv_type>(y);
 
                 x = 0;
 
-#if CV_SSE2
+#if CV_SIMD128 && !CV_NEON
                 for( ; x <= winSize.width*cn - 8; x += 8, dIptr += 8*2 )
                 {
-                    __m128i diff0 = _mm_loadu_si128((const __m128i*)(Iptr + x)), diff1;
-                    __m128i v00 = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i*)(Jptr + x)), z);
-                    __m128i v01 = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i*)(Jptr + x + cn)), z);
-                    __m128i v10 = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i*)(Jptr + x + stepJ)), z);
-                    __m128i v11 = _mm_unpacklo_epi8(_mm_loadl_epi64((const __m128i*)(Jptr + x + stepJ + cn)), z);
+                    v_int16x8 diff0 = v_reinterpret_as_s16(v_load(Iptr + x)), diff1, diff2;
+                    v_int16x8 v00 = v_reinterpret_as_s16(v_load_expand(Jptr + x));
+                    v_int16x8 v01 = v_reinterpret_as_s16(v_load_expand(Jptr + x + cn));
+                    v_int16x8 v10 = v_reinterpret_as_s16(v_load_expand(Jptr + x + stepJ));
+                    v_int16x8 v11 = v_reinterpret_as_s16(v_load_expand(Jptr + x + stepJ + cn));
 
-                    __m128i t0 = _mm_add_epi32(_mm_madd_epi16(_mm_unpacklo_epi16(v00, v01), qw0),
-                                               _mm_madd_epi16(_mm_unpacklo_epi16(v10, v11), qw1));
-                    __m128i t1 = _mm_add_epi32(_mm_madd_epi16(_mm_unpackhi_epi16(v00, v01), qw0),
-                                               _mm_madd_epi16(_mm_unpackhi_epi16(v10, v11), qw1));
-                    t0 = _mm_srai_epi32(_mm_add_epi32(t0, qdelta), W_BITS1-5);
-                    t1 = _mm_srai_epi32(_mm_add_epi32(t1, qdelta), W_BITS1-5);
-                    diff0 = _mm_subs_epi16(_mm_packs_epi32(t0, t1), diff0);
-                    diff1 = _mm_unpackhi_epi16(diff0, diff0);
-                    diff0 = _mm_unpacklo_epi16(diff0, diff0); // It0 It0 It1 It1 ...
-                    v00 = _mm_loadu_si128((const __m128i*)(dIptr)); // Ix0 Iy0 Ix1 Iy1 ...
-                    v01 = _mm_loadu_si128((const __m128i*)(dIptr + 8));
-                    v10 = _mm_mullo_epi16(v00, diff0);
-                    v11 = _mm_mulhi_epi16(v00, diff0);
-                    v00 = _mm_unpacklo_epi16(v10, v11);
-                    v10 = _mm_unpackhi_epi16(v10, v11);
-                    qb0 = _mm_add_ps(qb0, _mm_cvtepi32_ps(v00));
-                    qb1 = _mm_add_ps(qb1, _mm_cvtepi32_ps(v10));
-                    v10 = _mm_mullo_epi16(v01, diff1);
-                    v11 = _mm_mulhi_epi16(v01, diff1);
-                    v00 = _mm_unpacklo_epi16(v10, v11);
-                    v10 = _mm_unpackhi_epi16(v10, v11);
-                    qb0 = _mm_add_ps(qb0, _mm_cvtepi32_ps(v00));
-                    qb1 = _mm_add_ps(qb1, _mm_cvtepi32_ps(v10));
+                    v_int32x4 t0, t1;
+                    v_int16x8 t00, t01, t10, t11;
+                    v_zip(v00, v01, t00, t01);
+                    v_zip(v10, v11, t10, t11);
+
+                    t0 = v_add(v_dotprod(t00, qw0, qdelta), v_dotprod(t10, qw1));
+                    t1 = v_add(v_dotprod(t01, qw0, qdelta), v_dotprod(t11, qw1));
+                    t0 = v_shr<W_BITS1 - 5>(t0);
+                    t1 = v_shr<W_BITS1 - 5>(t1);
+                    diff0 = v_sub(v_pack(t0, t1), diff0);
+                    v_zip(diff0, diff0, diff2, diff1); // It0 It0 It1 It1 ...
+                    v00 = v_reinterpret_as_s16(v_load(dIptr)); // Ix0 Iy0 Ix1 Iy1 ...
+                    v01 = v_reinterpret_as_s16(v_load(dIptr + 8));
+                    v_zip(v00, v01, v10, v11);
+                    v_zip(diff2, diff1, v00, v01);
+                    qb0 = v_add(qb0, v_cvt_f32(v_dotprod(v00, v10)));
+                    qb1 = v_add(qb1, v_cvt_f32(v_dotprod(v01, v11)));
+                }
+#endif
+
+#if CV_NEON
+                for( ; x <= winSize.width*cn - 8; x += 8, dIptr += 8*2 )
+                {
+
+                    uint8x8_t d0 = vld1_u8(&Jptr[x]);
+                    uint8x8_t d2 = vld1_u8(&Jptr[x+cn]);
+                    uint8x8_t d4 = vld1_u8(&Jptr[x+stepJ]);
+                    uint8x8_t d6 = vld1_u8(&Jptr[x+stepJ+cn]);
+
+                    uint16x8_t q0 = vmovl_u8(d0);
+                    uint16x8_t q1 = vmovl_u8(d2);
+                    uint16x8_t q2 = vmovl_u8(d4);
+                    uint16x8_t q3 = vmovl_u8(d6);
+
+                    int32x4_t nq4 = vmull_s16(vget_low_s16(vreinterpretq_s16_u16(q0)), d26_2);
+                    int32x4_t nq5 = vmull_s16(vget_high_s16(vreinterpretq_s16_u16(q0)), d26_2);
+
+                    int32x4_t nq6 = vmull_s16(vget_low_s16(vreinterpretq_s16_u16(q1)), d27_2);
+                    int32x4_t nq7 = vmull_s16(vget_high_s16(vreinterpretq_s16_u16(q1)), d27_2);
+
+                    int32x4_t nq8 = vmull_s16(vget_low_s16(vreinterpretq_s16_u16(q2)), d28_2);
+                    int32x4_t nq9 = vmull_s16(vget_high_s16(vreinterpretq_s16_u16(q2)), d28_2);
+
+                    int32x4_t nq10 = vmull_s16(vget_low_s16(vreinterpretq_s16_u16(q3)), d29_2);
+                    int32x4_t nq11 = vmull_s16(vget_high_s16(vreinterpretq_s16_u16(q3)), d29_2);
+
+                    nq4 = vaddq_s32(nq4, nq6);
+                    nq5 = vaddq_s32(nq5, nq7);
+                    nq8 = vaddq_s32(nq8, nq10);
+                    nq9 = vaddq_s32(nq9, nq11);
+
+                    int16x8_t q6 = vld1q_s16(&Iptr[x]);
+
+                    nq4 = vaddq_s32(nq4, nq8);
+                    nq5 = vaddq_s32(nq5, nq9);
+
+                    nq8 = vmovl_s16(vget_high_s16(q6));
+                    nq6 = vmovl_s16(vget_low_s16(q6));
+
+                    nq4 = vqrshlq_s32(nq4, q11);
+                    nq5 = vqrshlq_s32(nq5, q11);
+
+                    int16x8x2_t q0q1 = vld2q_s16(dIptr);
+                    float32x4_t nB1v = vld1q_f32(nB1);
+                    float32x4_t nB2v = vld1q_f32(nB2);
+
+                    nq4 = vsubq_s32(nq4, nq6);
+                    nq5 = vsubq_s32(nq5, nq8);
+
+                    int32x4_t nq2 = vmovl_s16(vget_low_s16(q0q1.val[0]));
+                    int32x4_t nq3 = vmovl_s16(vget_high_s16(q0q1.val[0]));
+
+                    nq7 = vmovl_s16(vget_low_s16(q0q1.val[1]));
+                    nq8 = vmovl_s16(vget_high_s16(q0q1.val[1]));
+
+                    nq9 = vmulq_s32(nq4, nq2);
+                    nq10 = vmulq_s32(nq5, nq3);
+
+                    nq4 = vmulq_s32(nq4, nq7);
+                    nq5 = vmulq_s32(nq5, nq8);
+
+                    nq9 = vaddq_s32(nq9, nq10);
+                    nq4 = vaddq_s32(nq4, nq5);
+
+                    nB1v = vaddq_f32(nB1v, vcvtq_f32_s32(nq9));
+                    nB2v = vaddq_f32(nB2v, vcvtq_f32_s32(nq4));
+
+                    vst1q_f32(nB1, nB1v);
+                    vst1q_f32(nB2, nB2v);
+                }
+#elif CV_RVV
+                for( ; x < winSize.width*cn; )
+                {
+                    const size_t vl = __riscv_vsetvl_e16m1(winSize.width*cn - x);
+
+                    vuint16m1_t j00 = __riscv_vwcvtu_x_x_v_u16m1(
+                            __riscv_vle8_v_u8mf2(Jptr + x, vl), vl);
+                    vint32m2_t interp = __riscv_vwmul_vx_i32m2(
+                            __riscv_vreinterpret_i16m1(j00), (int16_t)iw00, vl);
+
+                    vuint16m1_t j01 = __riscv_vwcvtu_x_x_v_u16m1(
+                            __riscv_vle8_v_u8mf2(Jptr + x + cn, vl), vl);
+                    interp = __riscv_vwmacc_vx_i32m2(
+                            interp, (int16_t)iw01, __riscv_vreinterpret_i16m1(j01), vl);
+
+                    vuint16m1_t j10 = __riscv_vwcvtu_x_x_v_u16m1(
+                            __riscv_vle8_v_u8mf2(Jptr + x + stepJ, vl), vl);
+                    interp = __riscv_vwmacc_vx_i32m2(
+                            interp, (int16_t)iw10, __riscv_vreinterpret_i16m1(j10), vl);
+
+                    vuint16m1_t j11 = __riscv_vwcvtu_x_x_v_u16m1(
+                            __riscv_vle8_v_u8mf2(Jptr + x + stepJ + cn, vl), vl);
+                    interp = __riscv_vwmacc_vx_i32m2(
+                            interp, (int16_t)iw11, __riscv_vreinterpret_i16m1(j11), vl);
+
+                    interp = __riscv_vsra_vx_i32m2(
+                            __riscv_vadd_vx_i32m2(
+                                    interp, 1 << (W_BITS1 - 5 - 1), vl),
+                            W_BITS1 - 5, vl);
+                    vint32m2_t diff = __riscv_vsub_vv_i32m2(
+                            interp,
+                            __riscv_vwcvt_x_x_v_i32m2(
+                                    __riscv_vle16_v_i16m1(Iptr + x, vl), vl),
+                            vl);
+
+                    vint16m1x2_t gradient = __riscv_vlseg2e16_v_i16m1x2(dIptr, vl);
+                    vint32m2_t ix = __riscv_vwcvt_x_x_v_i32m2(
+                            __riscv_vget_v_i16m1x2_i16m1(gradient, 0), vl);
+                    vint32m2_t iy = __riscv_vwcvt_x_x_v_i32m2(
+                            __riscv_vget_v_i16m1x2_i16m1(gradient, 1), vl);
+
+                    rvvB1 = __riscv_vfadd_tu(
+                            rvvB1, rvvB1,
+                            __riscv_vfcvt_f_x_v_f32m2(
+                                    __riscv_vmul_vv_i32m2(diff, ix, vl), vl),
+                            vl);
+                    rvvB2 = __riscv_vfadd_tu(
+                            rvvB2, rvvB2,
+                            __riscv_vfcvt_f_x_v_f32m2(
+                                    __riscv_vmul_vv_i32m2(diff, iy, vl), vl),
+                            vl);
+
+                    x += (int)vl;
+                    dIptr += vl*2;
                 }
 #endif
 
@@ -423,11 +753,23 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
                 }
             }
 
-#if CV_SSE2
-            float CV_DECL_ALIGNED(16) bbuf[4];
-            _mm_store_ps(bbuf, _mm_add_ps(qb0, qb1));
-            ib1 += bbuf[0] + bbuf[2];
-            ib2 += bbuf[1] + bbuf[3];
+#if CV_SIMD128 && !CV_NEON
+            v_float32x4 qf0, qf1;
+            v_recombine(v_interleave_pairs(v_add(qb0, qb1)), v_setzero_f32(), qf0, qf1);
+            ib1 += v_reduce_sum(qf0);
+            ib2 += v_reduce_sum(qf1);
+#endif
+
+#if CV_NEON
+
+            ib1 += (float)(nB1[0] + nB1[1] + nB1[2] + nB1[3]);
+            ib2 += (float)(nB2[0] + nB2[1] + nB2[2] + nB2[3]);
+#elif CV_RVV
+            vfloat32m1_t rvvZero = __riscv_vfmv_v_f_f32m1(0.f, 1);
+            ib1 += __riscv_vfmv_f_s_f32m1_f32(
+                    __riscv_vfredusum_vs_f32m2_f32m1(rvvB1, rvvZero, rvv_lanes));
+            ib2 += __riscv_vfmv_f_s_f32m1_f32(
+                    __riscv_vfredusum_vs_f32m2_f32m1(rvvB2, rvvZero, rvv_lanes));
 #endif
 
             b1 = ib1*FLT_SCALE;
@@ -463,8 +805,7 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
             if( inextPoint.x < -winSize.width || inextPoint.x >= J.cols ||
                 inextPoint.y < -winSize.height || inextPoint.y >= J.rows )
             {
-                if( status )
-                    status[ptidx] = false;
+                status[ptidx] = false;
                 continue;
             }
 
@@ -478,8 +819,8 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
 
             for( y = 0; y < winSize.height; y++ )
             {
-                const uchar* Jptr = (const uchar*)J.data + (y + inextPoint.y)*stepJ + inextPoint.x*cn;
-                const deriv_type* Iptr = (const deriv_type*)(IWinBuf.data + y*IWinBuf.step);
+                const uchar* Jptr = J.ptr() + (y + inextPoint.y)*stepJ + inextPoint.x*cn;
+                const deriv_type* Iptr = IWinBuf.ptr<deriv_type>(y);
 
                 for( x = 0; x < winSize.width*cn; x++ )
                 {
@@ -497,11 +838,13 @@ void cv::detail::LKTrackerInvoker::operator()(const Range& range) const
 int cv::buildOpticalFlowPyramid(InputArray _img, OutputArrayOfArrays pyramid, Size winSize, int maxLevel, bool withDerivatives,
                                 int pyrBorder, int derivBorder, bool tryReuseInputImage)
 {
+    CV_INSTRUMENT_REGION();
+
     Mat img = _img.getMat();
     CV_Assert(img.depth() == CV_8U && winSize.width > 2 && winSize.height > 2 );
     int pyrstep = withDerivatives ? 2 : 1;
 
-    pyramid.create(1, (maxLevel + 1) * pyrstep, 0 /*type*/, -1, true, 0);
+    pyramid.create(1, (maxLevel + 1) * pyrstep, 0 /*type*/, -1, true);
 
     int derivType = CV_MAKETYPE(DataType<cv::detail::deriv_type>::depth, img.channels() * 2);
 
@@ -570,7 +913,7 @@ int cv::buildOpticalFlowPyramid(InputArray _img, OutputArrayOfArrays pyramid, Si
                 deriv.create(sz.height + winSize.height*2, sz.width + winSize.width*2, derivType);
 
             Mat derivI = deriv(Rect(winSize.width, winSize.height, sz.width, sz.height));
-            calcSharrDeriv(thisLevel, derivI);
+            calcScharrDeriv(thisLevel, derivI);
 
             if(derivBorder != BORDER_TRANSPARENT)
                 copyMakeBorder(derivI, deriv, winSize.height, winSize.height, winSize.width, winSize.width, derivBorder|BORDER_ISOLATED);
@@ -580,7 +923,7 @@ int cv::buildOpticalFlowPyramid(InputArray _img, OutputArrayOfArrays pyramid, Si
         sz = Size((sz.width+1)/2, (sz.height+1)/2);
         if( sz.width <= winSize.width || sz.height <= winSize.height )
         {
-            pyramid.create(1, (level + 1) * pyrstep, 0 /*type*/, -1, true, 0);//check this
+            pyramid.create(1, (level + 1) * pyrstep, 0 /*type*/, -1, true);//check this
             return level;
         }
 
@@ -590,13 +933,284 @@ int cv::buildOpticalFlowPyramid(InputArray _img, OutputArrayOfArrays pyramid, Si
     return maxLevel;
 }
 
-void cv::calcOpticalFlowPyrLK( InputArray _prevImg, InputArray _nextImg,
-                           InputArray _prevPts, InputOutputArray _nextPts,
-                           OutputArray _status, OutputArray _err,
-                           Size winSize, int maxLevel,
-                           TermCriteria criteria,
-                           int flags, double minEigThreshold )
+namespace cv
 {
+namespace
+{
+    class SparsePyrLKOpticalFlowImpl : public SparsePyrLKOpticalFlow
+    {
+        struct dim3
+        {
+            unsigned int x, y, z;
+            dim3() : x(0), y(0), z(0) { }
+        };
+    public:
+        SparsePyrLKOpticalFlowImpl(Size winSize_ = Size(21,21),
+                         int maxLevel_ = 3,
+                         TermCriteria criteria_ = TermCriteria(TermCriteria::COUNT+TermCriteria::EPS, 30, 0.01),
+                         int flags_ = 0,
+                         double minEigThreshold_ = 1e-4) :
+          winSize(winSize_), maxLevel(maxLevel_), criteria(criteria_), flags(flags_), minEigThreshold(minEigThreshold_)
+#ifdef HAVE_OPENCL
+          , iters(criteria_.maxCount), derivLambda(criteria_.epsilon), useInitialFlow(0 != (flags_ & OPTFLOW_LK_GET_MIN_EIGENVALS))
+#endif
+        {
+        }
+
+        virtual Size getWinSize() const CV_OVERRIDE { return winSize;}
+        virtual void setWinSize(Size winSize_) CV_OVERRIDE { winSize = winSize_;}
+
+        virtual int getMaxLevel() const CV_OVERRIDE { return maxLevel;}
+        virtual void setMaxLevel(int maxLevel_) CV_OVERRIDE { maxLevel = maxLevel_;}
+
+        virtual TermCriteria getTermCriteria() const CV_OVERRIDE { return criteria;}
+        virtual void setTermCriteria(TermCriteria& crit_) CV_OVERRIDE { criteria=crit_;}
+
+        virtual int getFlags() const CV_OVERRIDE { return flags; }
+        virtual void setFlags(int flags_) CV_OVERRIDE { flags=flags_;}
+
+        virtual double getMinEigThreshold() const CV_OVERRIDE { return minEigThreshold;}
+        virtual void setMinEigThreshold(double minEigThreshold_) CV_OVERRIDE { minEigThreshold=minEigThreshold_;}
+
+        virtual void calc(InputArray prevImg, InputArray nextImg,
+                          InputArray prevPts, InputOutputArray nextPts,
+                          OutputArray status,
+                          OutputArray err = cv::noArray()) CV_OVERRIDE;
+
+        virtual String getDefaultName() const CV_OVERRIDE { return "SparseOpticalFlow.SparsePyrLKOpticalFlow"; }
+
+    private:
+#ifdef HAVE_OPENCL
+        bool checkParam()
+        {
+            iters = std::min(std::max(iters, 0), 100);
+
+            derivLambda = std::min(std::max(derivLambda, 0.0), 1.0);
+            if (derivLambda < 0)
+                return false;
+            if (maxLevel < 0 || winSize.width <= 2 || winSize.height <= 2)
+                return false;
+            if (winSize.width < 8 || winSize.height < 8 ||
+                winSize.width > 24 || winSize.height > 24)
+                return false;
+            calcPatchSize();
+            if (patch.x <= 0 || patch.x >= 6 || patch.y <= 0 || patch.y >= 6)
+                return false;
+            return true;
+        }
+
+        bool sparse(const UMat &prevImg, const UMat &nextImg, const UMat &prevPts, UMat &nextPts, UMat &status, UMat &err)
+        {
+            if (!checkParam())
+                return false;
+
+            UMat temp1 = (useInitialFlow ? nextPts : prevPts).reshape(1);
+            UMat temp2 = nextPts.reshape(1);
+            multiply(1.0f / (1 << maxLevel) /2.0f, temp1, temp2);
+
+            status.setTo(Scalar::all(1));
+
+            // build the image pyramids.
+            std::vector<UMat> prevPyr; prevPyr.resize(maxLevel + 1);
+            std::vector<UMat> nextPyr; nextPyr.resize(maxLevel + 1);
+
+            // allocate buffers with aligned pitch to be able to use cl_khr_image2d_from_buffer extension
+            // This is the required pitch alignment in pixels
+            int pitchAlign = (int)ocl::Device::getDefault().imagePitchAlignment();
+            if (pitchAlign>0)
+            {
+                prevPyr[0] = UMat(prevImg.rows,(prevImg.cols+pitchAlign-1)&(-pitchAlign),CV_32FC1).colRange(0,prevImg.cols);
+                nextPyr[0] = UMat(nextImg.rows,(nextImg.cols+pitchAlign-1)&(-pitchAlign),CV_32FC1).colRange(0,nextImg.cols);
+                for (int level = 1; level <= maxLevel; ++level)
+                {
+                    int cols,rows;
+                    // allocate buffers with aligned pitch to be able to use image on buffer extension
+                    cols = (prevPyr[level - 1].cols+1)/2;
+                    rows = (prevPyr[level - 1].rows+1)/2;
+                    prevPyr[level] = UMat(rows,(cols+pitchAlign-1)&(-pitchAlign),prevPyr[level-1].type()).colRange(0,cols);
+                    cols = (nextPyr[level - 1].cols+1)/2;
+                    rows = (nextPyr[level - 1].rows+1)/2;
+                    nextPyr[level] = UMat(rows,(cols+pitchAlign-1)&(-pitchAlign),nextPyr[level-1].type()).colRange(0,cols);
+                }
+            }
+
+            prevImg.convertTo(prevPyr[0], CV_32F);
+            nextImg.convertTo(nextPyr[0], CV_32F);
+
+            for (int level = 1; level <= maxLevel; ++level)
+            {
+                pyrDown(prevPyr[level - 1], prevPyr[level]);
+                pyrDown(nextPyr[level - 1], nextPyr[level]);
+            }
+
+            // dI/dx ~ Ix, dI/dy ~ Iy
+            for (int level = maxLevel; level >= 0; level--)
+            {
+                if (!lkSparse_run(prevPyr[level], nextPyr[level], prevPts,
+                                  nextPts, status, err,
+                                  static_cast<int>(prevPts.total()),
+                                  level))
+                    return false;
+            }
+            return true;
+        }
+#endif
+
+        Size winSize;
+        int maxLevel;
+        TermCriteria criteria;
+        int flags;
+        double minEigThreshold;
+#ifdef HAVE_OPENCL
+        int iters;
+        double derivLambda;
+        bool useInitialFlow;
+        dim3 patch;
+        void calcPatchSize()
+        {
+            dim3 block;
+
+            if (winSize.width > 32 && winSize.width > 2 * winSize.height)
+            {
+                block.x = 32;
+                block.y = 8;
+            }
+            else
+            {
+                block.x = 16;
+                block.y = 16;
+            }
+
+            patch.x = (winSize.width  + block.x - 1) / block.x;
+            patch.y = (winSize.height + block.y - 1) / block.y;
+
+            block.z = patch.z = 1;
+        }
+
+        bool lkSparse_run(UMat &I, UMat &J, const UMat &prevPts, UMat &nextPts, UMat &status, UMat& err,
+            int ptcount, int level)
+        {
+            size_t localThreads[3]  = { 8, 8};
+            size_t globalThreads[3] = { 8 * (size_t)ptcount, 8};
+            char calcErr = (0 == level) ? 1 : 0;
+
+            int wsx = 1, wsy = 1;
+            if(winSize.width < 16)
+                wsx = 0;
+            if(winSize.height < 16)
+                wsy = 0;
+            cv::String build_options;
+            if (isDeviceCPU())
+                build_options = " -D CPU";
+            else
+                build_options = cv::format("-D WSX=%d -D WSY=%d",
+                                           wsx, wsy);
+
+            ocl::Kernel kernel;
+            if (!kernel.create("lkSparse", cv::ocl::video::pyrlk_oclsrc, build_options))
+                return false;
+
+            CV_Assert(I.depth() == CV_32F && J.depth() == CV_32F);
+            ocl::Image2D imageI(I, false, ocl::Image2D::canCreateAlias(I));
+            ocl::Image2D imageJ(J, false, ocl::Image2D::canCreateAlias(J));
+
+            int idxArg = 0;
+            idxArg = kernel.set(idxArg, imageI); //image2d_t I
+            idxArg = kernel.set(idxArg, imageJ); //image2d_t J
+            idxArg = kernel.set(idxArg, ocl::KernelArg::PtrReadOnly(prevPts)); // __global const float2* prevPts
+            idxArg = kernel.set(idxArg, ocl::KernelArg::PtrReadWrite(nextPts)); // __global const float2* nextPts
+            idxArg = kernel.set(idxArg, ocl::KernelArg::PtrReadWrite(status)); // __global uchar* status
+            idxArg = kernel.set(idxArg, ocl::KernelArg::PtrReadWrite(err)); // __global float* err
+            idxArg = kernel.set(idxArg, (int)level); // const int level
+            idxArg = kernel.set(idxArg, (int)I.rows); // const int rows
+            idxArg = kernel.set(idxArg, (int)I.cols); // const int cols
+            idxArg = kernel.set(idxArg, (int)patch.x); // int PATCH_X
+            idxArg = kernel.set(idxArg, (int)patch.y); // int PATCH_Y
+            idxArg = kernel.set(idxArg, (int)winSize.width); // int c_winSize_x
+            idxArg = kernel.set(idxArg, (int)winSize.height); // int c_winSize_y
+            idxArg = kernel.set(idxArg, (int)iters); // int c_iters
+            idxArg = kernel.set(idxArg, (char)calcErr); //char calcErr
+            return kernel.run(2, globalThreads, localThreads, true); // sync=true because ocl::Image2D lifetime is not handled well for temp UMat
+        }
+    private:
+        inline static bool isDeviceCPU()
+        {
+            return (cv::ocl::Device::TYPE_CPU == cv::ocl::Device::getDefault().type());
+        }
+
+
+    bool ocl_calcOpticalFlowPyrLK(InputArray _prevImg, InputArray _nextImg,
+                                         InputArray _prevPts, InputOutputArray _nextPts,
+                                         OutputArray _status, OutputArray _err)
+    {
+        if (0 != (OPTFLOW_LK_GET_MIN_EIGENVALS & flags))
+            return false;
+        if (!cv::ocl::Device::getDefault().imageSupport())
+            return false;
+        if (_nextImg.size() != _prevImg.size())
+            return false;
+        int typePrev = _prevImg.type();
+        int typeNext = _nextImg.type();
+        if ((1 != CV_MAT_CN(typePrev)) || (1 != CV_MAT_CN(typeNext)))
+            return false;
+        if ((0 != CV_MAT_DEPTH(typePrev)) || (0 != CV_MAT_DEPTH(typeNext)))
+            return false;
+
+        if (_prevPts.empty() || _prevPts.type() != CV_32FC2 || (!_prevPts.isContinuous()))
+            return false;
+        if ((1 != _prevPts.size().height) && (1 != _prevPts.size().width))
+            return false;
+        size_t npoints = _prevPts.total();
+        if (useInitialFlow)
+        {
+            if (_nextPts.empty() || _nextPts.type() != CV_32FC2 || (!_prevPts.isContinuous()))
+                return false;
+            if ((1 != _nextPts.size().height) && (1 != _nextPts.size().width))
+                return false;
+            if (_nextPts.total() != npoints)
+                return false;
+        }
+        else
+        {
+            _nextPts.create(_prevPts.size(), _prevPts.type());
+        }
+
+        if (!checkParam())
+            return false;
+
+        UMat umatErr;
+        if (_err.needed())
+        {
+            _err.create((int)npoints, 1, CV_32FC1);
+            umatErr = _err.getUMat();
+        }
+        else
+            umatErr.create((int)npoints, 1, CV_32FC1);
+
+        _status.create((int)npoints, 1, CV_8UC1);
+        UMat umatNextPts = _nextPts.getUMat();
+        UMat umatStatus = _status.getUMat();
+        UMat umatPrevPts;
+        _prevPts.getMat().copyTo(umatPrevPts);
+        return sparse(_prevImg.getUMat(), _nextImg.getUMat(), umatPrevPts, umatNextPts, umatStatus, umatErr);
+    }
+#endif
+
+};
+
+
+
+void SparsePyrLKOpticalFlowImpl::calc( InputArray _prevImg, InputArray _nextImg,
+                           InputArray _prevPts, InputOutputArray _nextPts,
+                           OutputArray _status, OutputArray _err)
+{
+    CV_INSTRUMENT_REGION();
+
+    CV_OCL_RUN(ocl::isOpenCLActivated() &&
+               (_prevImg.isUMat() || _nextImg.isUMat()) &&
+               ocl::Image2D::isFormatSupported(CV_32F, 1, false),
+               ocl_calcOpticalFlowPyrLK(_prevImg, _nextImg, _prevPts, _nextPts, _status, _err))
+
     Mat prevPtsMat = _prevPts.getMat();
     const int derivDepth = DataType<cv::detail::deriv_type>::depth;
 
@@ -619,13 +1233,13 @@ void cv::calcOpticalFlowPyrLK( InputArray _prevImg, InputArray _nextImg,
     Mat nextPtsMat = _nextPts.getMat();
     CV_Assert( nextPtsMat.checkVector(2, CV_32F, true) == npoints );
 
-    const Point2f* prevPts = (const Point2f*)prevPtsMat.data;
-    Point2f* nextPts = (Point2f*)nextPtsMat.data;
+    const Point2f* prevPts = prevPtsMat.ptr<Point2f>();
+    Point2f* nextPts = nextPtsMat.ptr<Point2f>();
 
     _status.create((int)npoints, 1, CV_8U, -1, true);
     Mat statusMat = _status.getMat(), errMat;
     CV_Assert( statusMat.isContinuous() );
-    uchar* status = statusMat.data;
+    uchar* status = statusMat.ptr();
     float* err = 0;
 
     for( i = 0; i < npoints; i++ )
@@ -636,7 +1250,7 @@ void cv::calcOpticalFlowPyrLK( InputArray _prevImg, InputArray _nextImg,
         _err.create((int)npoints, 1, CV_32F, -1, true);
         errMat = _err.getMat();
         CV_Assert( errMat.isContinuous() );
-        err = (float*)errMat.data;
+        err = errMat.ptr<float>();
     }
 
     std::vector<Mat> prevPyr, nextPyr;
@@ -658,7 +1272,7 @@ void cv::calcOpticalFlowPyrLK( InputArray _prevImg, InputArray _nextImg,
             levels1 /= 2;
         }
 
-        // ensure that pyramid has reqired padding
+        // ensure that pyramid has required padding
         if(levels1 > 0)
         {
             Size fullSize;
@@ -686,7 +1300,7 @@ void cv::calcOpticalFlowPyrLK( InputArray _prevImg, InputArray _nextImg,
             levels2 /= 2;
         }
 
-        // ensure that pyramid has reqired padding
+        // ensure that pyramid has required padding
         if(levels2 > 0)
         {
             Size fullSize;
@@ -729,9 +1343,9 @@ void cv::calcOpticalFlowPyrLK( InputArray _prevImg, InputArray _nextImg,
         {
             Size imgSize = prevPyr[level * lvlStep1].size();
             Mat _derivI( imgSize.height + winSize.height*2,
-                imgSize.width + winSize.width*2, derivIBuf.type(), derivIBuf.data );
+                imgSize.width + winSize.width*2, derivIBuf.type(), derivIBuf.ptr() );
             derivI = _derivI(Rect(winSize.width, winSize.height, imgSize.width, imgSize.height));
-            calcSharrDeriv(prevPyr[level * lvlStep1], derivI);
+            calcScharrDeriv(prevPyr[level * lvlStep1], derivI);
             copyMakeBorder(derivI, _derivI, winSize.height, winSize.height, winSize.width, winSize.width, BORDER_CONSTANT|BORDER_ISOLATED);
         }
         else
@@ -740,12 +1354,7 @@ void cv::calcOpticalFlowPyrLK( InputArray _prevImg, InputArray _nextImg,
         CV_Assert(prevPyr[level * lvlStep1].size() == nextPyr[level * lvlStep2].size());
         CV_Assert(prevPyr[level * lvlStep1].type() == nextPyr[level * lvlStep2].type());
 
-#ifdef HAVE_TEGRA_OPTIMIZATION
-        typedef tegra::LKTrackerInvoker<cv::detail::LKTrackerInvoker> LKTrackerInvoker;
-#else
         typedef cv::detail::LKTrackerInvoker LKTrackerInvoker;
-#endif
-
         parallel_for_(Range(0, npoints), LKTrackerInvoker(prevPyr[level * lvlStep1], derivI,
                                                           nextPyr[level * lvlStep2], prevPts, nextPts,
                                                           status, err,
@@ -754,114 +1363,39 @@ void cv::calcOpticalFlowPyrLK( InputArray _prevImg, InputArray _nextImg,
     }
 }
 
-namespace cv
-{
-
-static void
-getRTMatrix( const Point2f* a, const Point2f* b,
-             int count, Mat& M, bool fullAffine )
-{
-    CV_Assert( M.isContinuous() );
-
-    if( fullAffine )
-    {
-        double sa[6][6]={{0.}}, sb[6]={0.};
-        Mat A( 6, 6, CV_64F, &sa[0][0] ), B( 6, 1, CV_64F, sb );
-        Mat MM = M.reshape(1, 6);
-
-        for( int i = 0; i < count; i++ )
-        {
-            sa[0][0] += a[i].x*a[i].x;
-            sa[0][1] += a[i].y*a[i].x;
-            sa[0][2] += a[i].x;
-
-            sa[1][1] += a[i].y*a[i].y;
-            sa[1][2] += a[i].y;
-
-            sa[2][2] += 1;
-
-            sb[0] += a[i].x*b[i].x;
-            sb[1] += a[i].y*b[i].x;
-            sb[2] += b[i].x;
-            sb[3] += a[i].x*b[i].y;
-            sb[4] += a[i].y*b[i].y;
-            sb[5] += b[i].y;
-        }
-
-        sa[3][4] = sa[4][3] = sa[1][0] = sa[0][1];
-        sa[3][5] = sa[5][3] = sa[2][0] = sa[0][2];
-        sa[4][5] = sa[5][4] = sa[2][1] = sa[1][2];
-
-        sa[3][3] = sa[0][0];
-        sa[4][4] = sa[1][1];
-        sa[5][5] = sa[2][2];
-
-        solve( A, B, MM, DECOMP_EIG );
-    }
-    else
-    {
-        double sa[4][4]={{0.}}, sb[4]={0.}, m[4];
-        Mat A( 4, 4, CV_64F, sa ), B( 4, 1, CV_64F, sb );
-        Mat MM( 4, 1, CV_64F, m );
-
-        for( int i = 0; i < count; i++ )
-        {
-            sa[0][0] += a[i].x*a[i].x + a[i].y*a[i].y;
-            sa[0][2] += a[i].x;
-            sa[0][3] += a[i].y;
-
-
-            sa[2][1] += -a[i].y;
-            sa[2][2] += 1;
-
-            sa[3][0] += a[i].y;
-            sa[3][1] += a[i].x;
-            sa[3][3] += 1;
-
-            sb[0] += a[i].x*b[i].x + a[i].y*b[i].y;
-            sb[1] += a[i].x*b[i].y - a[i].y*b[i].x;
-            sb[2] += b[i].x;
-            sb[3] += b[i].y;
-        }
-
-        sa[1][1] = sa[0][0];
-        sa[2][1] = sa[1][2] = -sa[0][3];
-        sa[3][1] = sa[1][3] = sa[2][0] = sa[0][2];
-        sa[2][2] = sa[3][3] = count;
-        sa[3][0] = sa[0][3];
-
-        solve( A, B, MM, DECOMP_EIG );
-
-        double* om = M.ptr<double>();
-        om[0] = om[4] = m[0];
-        om[1] = -m[1];
-        om[3] = m[1];
-        om[2] = m[2];
-        om[5] = m[3];
-    }
+} // namespace
+} // namespace cv
+cv::Ptr<cv::SparsePyrLKOpticalFlow> cv::SparsePyrLKOpticalFlow::create(Size winSize, int maxLevel, TermCriteria crit, int flags, double minEigThreshold){
+    return makePtr<SparsePyrLKOpticalFlowImpl>(winSize,maxLevel,crit,flags,minEigThreshold);
 }
-
+void cv::calcOpticalFlowPyrLK( InputArray _prevImg, InputArray _nextImg,
+                               InputArray _prevPts, InputOutputArray _nextPts,
+                               OutputArray _status, OutputArray _err,
+                               Size winSize, int maxLevel,
+                               TermCriteria criteria,
+                               int flags, double minEigThreshold )
+{
+    Ptr<cv::SparsePyrLKOpticalFlow> optflow = cv::SparsePyrLKOpticalFlow::create(winSize,maxLevel,criteria,flags,minEigThreshold);
+    optflow->calc(_prevImg,_nextImg,_prevPts,_nextPts,_status,_err);
 }
 
 cv::Mat cv::estimateRigidTransform( InputArray src1, InputArray src2, bool fullAffine )
 {
-    Mat M(2, 3, CV_64F), A = src1.getMat(), B = src2.getMat();
+    CV_INSTRUMENT_REGION();
+#ifndef HAVE_OPENCV_GEOMETRY
+    CV_UNUSED(src1); CV_UNUSED(src2); CV_UNUSED(fullAffine);
+    CV_Error(Error::StsError, "estimateRigidTransform requires geometry module");
+#else
+    Mat A = src1.getMat(), B = src2.getMat();
 
     const int COUNT = 15;
     const int WIDTH = 160, HEIGHT = 120;
-    const int RANSAC_MAX_ITERS = 500;
-    const int RANSAC_SIZE0 = 3;
-    const double RANSAC_GOOD_RATIO = 0.5;
 
     std::vector<Point2f> pA, pB;
-    std::vector<int> good_idx;
     std::vector<uchar> status;
 
     double scale = 1.;
-    int i, j, k, k1;
-
-    RNG rng((uint64)-1);
-    int good_count = 0;
+    int i, j, k;
 
     if( A.size() != B.size() )
         CV_Error( Error::StsUnmatchedSizes, "Both input images must have the same size" );
@@ -873,11 +1407,13 @@ cv::Mat cv::estimateRigidTransform( InputArray src1, InputArray src2, bool fullA
 
     if( count > 0 )
     {
+        // inputs are points
         A.reshape(2, count).convertTo(pA, CV_32F);
         B.reshape(2, count).convertTo(pB, CV_32F);
     }
     else if( A.depth() == CV_8U )
     {
+        // inputs are images
         int cn = A.channels();
         CV_Assert( cn == 1 || cn == 3 || cn == 4 );
         Size sz0 = A.size();
@@ -949,108 +1485,13 @@ cv::Mat cv::estimateRigidTransform( InputArray src1, InputArray src2, bool fullA
     else
         CV_Error( Error::StsUnsupportedFormat, "Both input images must have either 8uC1 or 8uC3 type" );
 
-    good_idx.resize(count);
-
-    if( count < RANSAC_SIZE0 )
-        return Mat();
-
-    Rect brect = boundingRect(pB);
-
-    // RANSAC stuff:
-    // 1. find the consensus
-    for( k = 0; k < RANSAC_MAX_ITERS; k++ )
+    if (fullAffine)
     {
-        int idx[RANSAC_SIZE0];
-        Point2f a[RANSAC_SIZE0];
-        Point2f b[RANSAC_SIZE0];
-
-        // choose random 3 non-complanar points from A & B
-        for( i = 0; i < RANSAC_SIZE0; i++ )
-        {
-            for( k1 = 0; k1 < RANSAC_MAX_ITERS; k1++ )
-            {
-                idx[i] = rng.uniform(0, count);
-
-                for( j = 0; j < i; j++ )
-                {
-                    if( idx[j] == idx[i] )
-                        break;
-                    // check that the points are not very close one each other
-                    if( fabs(pA[idx[i]].x - pA[idx[j]].x) +
-                        fabs(pA[idx[i]].y - pA[idx[j]].y) < FLT_EPSILON )
-                        break;
-                    if( fabs(pB[idx[i]].x - pB[idx[j]].x) +
-                        fabs(pB[idx[i]].y - pB[idx[j]].y) < FLT_EPSILON )
-                        break;
-                }
-
-                if( j < i )
-                    continue;
-
-                if( i+1 == RANSAC_SIZE0 )
-                {
-                    // additional check for non-complanar vectors
-                    a[0] = pA[idx[0]];
-                    a[1] = pA[idx[1]];
-                    a[2] = pA[idx[2]];
-
-                    b[0] = pB[idx[0]];
-                    b[1] = pB[idx[1]];
-                    b[2] = pB[idx[2]];
-
-                    double dax1 = a[1].x - a[0].x, day1 = a[1].y - a[0].y;
-                    double dax2 = a[2].x - a[0].x, day2 = a[2].y - a[0].y;
-                    double dbx1 = b[1].x - b[0].x, dby1 = b[1].y - b[0].y;
-                    double dbx2 = b[2].x - b[0].x, dby2 = b[2].y - b[0].y;
-                    const double eps = 0.01;
-
-                    if( fabs(dax1*day2 - day1*dax2) < eps*std::sqrt(dax1*dax1+day1*day1)*std::sqrt(dax2*dax2+day2*day2) ||
-                        fabs(dbx1*dby2 - dby1*dbx2) < eps*std::sqrt(dbx1*dbx1+dby1*dby1)*std::sqrt(dbx2*dbx2+dby2*dby2) )
-                        continue;
-                }
-                break;
-            }
-
-            if( k1 >= RANSAC_MAX_ITERS )
-                break;
-        }
-
-        if( i < RANSAC_SIZE0 )
-            continue;
-
-        // estimate the transformation using 3 points
-        getRTMatrix( a, b, 3, M, fullAffine );
-
-        const double* m = M.ptr<double>();
-        for( i = 0, good_count = 0; i < count; i++ )
-        {
-            if( std::abs( m[0]*pA[i].x + m[1]*pA[i].y + m[2] - pB[i].x ) +
-                std::abs( m[3]*pA[i].x + m[4]*pA[i].y + m[5] - pB[i].y ) < std::max(brect.width,brect.height)*0.05 )
-                good_idx[good_count++] = i;
-        }
-
-        if( good_count >= count*RANSAC_GOOD_RATIO )
-            break;
+        return estimateAffine2D(pA, pB);
     }
-
-    if( k >= RANSAC_MAX_ITERS )
-        return Mat();
-
-    if( good_count < count )
+    else
     {
-        for( i = 0; i < good_count; i++ )
-        {
-            j = good_idx[i];
-            pA[i] = pA[j];
-            pB[i] = pB[j];
-        }
+        return estimateAffinePartial2D(pA, pB);
     }
-
-    getRTMatrix( &pA[0], &pB[0], good_count, M, fullAffine );
-    M.at<double>(0, 2) /= scale;
-    M.at<double>(1, 2) /= scale;
-
-    return M;
+#endif
 }
-
-/* End of file. */

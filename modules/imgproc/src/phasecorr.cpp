@@ -1,3 +1,7 @@
+// This file is a part of OpenCV project.
+// See opencv/LICENSE and http://opencv.org/license.html for the actual licensing terms.
+// See also opencv/doc/LICENSE_CHANGE_NOTICE.txt. Below is the original license:
+
 /*********************************************************************
  * Software License Agreement (BSD License)
  *
@@ -34,6 +38,7 @@
 
 #include "precomp.hpp"
 #include <vector>
+#include "opencv2/core/hal/intrin.hpp"
 
 namespace cv
 {
@@ -66,8 +71,8 @@ static void magSpectrums( InputArray _src, OutputArray _dst)
 
     if( depth == CV_32F )
     {
-        const float* dataSrc = (const float*)src.data;
-        float* dataDst = (float*)dst.data;
+        const float* dataSrc = src.ptr<float>();
+        float* dataDst = dst.ptr<float>();
 
         size_t stepSrc = src.step/sizeof(dataSrc[0]);
         size_t stepDst = dst.step/sizeof(dataDst[0]);
@@ -78,9 +83,9 @@ static void magSpectrums( InputArray _src, OutputArray _dst)
             {
                 if( k == 1 )
                     dataSrc += cols - 1, dataDst += cols - 1;
-                dataDst[0] = dataSrc[0]*dataSrc[0];
+                dataDst[0] = (float)std::abs(dataSrc[0]);
                 if( rows % 2 == 0 )
-                    dataDst[(rows-1)*stepDst] = dataSrc[(rows-1)*stepSrc]*dataSrc[(rows-1)*stepSrc];
+                    dataDst[(rows-1)*stepDst] = (float)std::abs(dataSrc[(rows-1)*stepSrc]);
 
                 for( j = 1; j <= rows - 2; j += 2 )
                 {
@@ -97,9 +102,9 @@ static void magSpectrums( InputArray _src, OutputArray _dst)
         {
             if( is_1d && cn == 1 )
             {
-                dataDst[0] = dataSrc[0]*dataSrc[0];
+                dataDst[0] = (float)std::abs(dataSrc[0]);
                 if( cols % 2 == 0 )
-                    dataDst[j1] = dataSrc[j1]*dataSrc[j1];
+                    dataDst[j1] = (float)std::abs(dataSrc[j1]);
             }
 
             for( j = j0; j < j1; j += 2 )
@@ -110,8 +115,8 @@ static void magSpectrums( InputArray _src, OutputArray _dst)
     }
     else
     {
-        const double* dataSrc = (const double*)src.data;
-        double* dataDst = (double*)dst.data;
+        const double* dataSrc = src.ptr<double>();
+        double* dataDst = dst.ptr<double>();
 
         size_t stepSrc = src.step/sizeof(dataSrc[0]);
         size_t stepDst = dst.step/sizeof(dataDst[0]);
@@ -122,9 +127,9 @@ static void magSpectrums( InputArray _src, OutputArray _dst)
             {
                 if( k == 1 )
                     dataSrc += cols - 1, dataDst += cols - 1;
-                dataDst[0] = dataSrc[0]*dataSrc[0];
+                dataDst[0] = std::abs(dataSrc[0]);
                 if( rows % 2 == 0 )
-                    dataDst[(rows-1)*stepDst] = dataSrc[(rows-1)*stepSrc]*dataSrc[(rows-1)*stepSrc];
+                    dataDst[(rows-1)*stepDst] = std::abs(dataSrc[(rows-1)*stepSrc]);
 
                 for( j = 1; j <= rows - 2; j += 2 )
                 {
@@ -141,9 +146,9 @@ static void magSpectrums( InputArray _src, OutputArray _dst)
         {
             if( is_1d && cn == 1 )
             {
-                dataDst[0] = dataSrc[0]*dataSrc[0];
+                dataDst[0] = std::abs(dataSrc[0]);
                 if( cols % 2 == 0 )
-                    dataDst[j1] = dataSrc[j1]*dataSrc[j1];
+                    dataDst[j1] = std::abs(dataSrc[j1]);
             }
 
             for( j = j0; j < j1; j += 2 )
@@ -152,201 +157,6 @@ static void magSpectrums( InputArray _src, OutputArray _dst)
             }
         }
     }
-}
-
-static void divSpectrums( InputArray _srcA, InputArray _srcB, OutputArray _dst, int flags, bool conjB)
-{
-    Mat srcA = _srcA.getMat(), srcB = _srcB.getMat();
-    int depth = srcA.depth(), cn = srcA.channels(), type = srcA.type();
-    int rows = srcA.rows, cols = srcA.cols;
-    int j, k;
-
-    CV_Assert( type == srcB.type() && srcA.size() == srcB.size() );
-    CV_Assert( type == CV_32FC1 || type == CV_32FC2 || type == CV_64FC1 || type == CV_64FC2 );
-
-    _dst.create( srcA.rows, srcA.cols, type );
-    Mat dst = _dst.getMat();
-
-    bool is_1d = (flags & DFT_ROWS) || (rows == 1 || (cols == 1 &&
-             srcA.isContinuous() && srcB.isContinuous() && dst.isContinuous()));
-
-    if( is_1d && !(flags & DFT_ROWS) )
-        cols = cols + rows - 1, rows = 1;
-
-    int ncols = cols*cn;
-    int j0 = cn == 1;
-    int j1 = ncols - (cols % 2 == 0 && cn == 1);
-
-    if( depth == CV_32F )
-    {
-        const float* dataA = (const float*)srcA.data;
-        const float* dataB = (const float*)srcB.data;
-        float* dataC = (float*)dst.data;
-        float eps = FLT_EPSILON; // prevent div0 problems
-
-        size_t stepA = srcA.step/sizeof(dataA[0]);
-        size_t stepB = srcB.step/sizeof(dataB[0]);
-        size_t stepC = dst.step/sizeof(dataC[0]);
-
-        if( !is_1d && cn == 1 )
-        {
-            for( k = 0; k < (cols % 2 ? 1 : 2); k++ )
-            {
-                if( k == 1 )
-                    dataA += cols - 1, dataB += cols - 1, dataC += cols - 1;
-                dataC[0] = dataA[0] / (dataB[0] + eps);
-                if( rows % 2 == 0 )
-                    dataC[(rows-1)*stepC] = dataA[(rows-1)*stepA] / (dataB[(rows-1)*stepB] + eps);
-                if( !conjB )
-                    for( j = 1; j <= rows - 2; j += 2 )
-                    {
-                        double denom = (double)dataB[j*stepB]*dataB[j*stepB] +
-                                       (double)dataB[(j+1)*stepB]*dataB[(j+1)*stepB] + (double)eps;
-
-                        double re = (double)dataA[j*stepA]*dataB[j*stepB] +
-                                    (double)dataA[(j+1)*stepA]*dataB[(j+1)*stepB];
-
-                        double im = (double)dataA[(j+1)*stepA]*dataB[j*stepB] -
-                                    (double)dataA[j*stepA]*dataB[(j+1)*stepB];
-
-                        dataC[j*stepC] = (float)(re / denom);
-                        dataC[(j+1)*stepC] = (float)(im / denom);
-                    }
-                else
-                    for( j = 1; j <= rows - 2; j += 2 )
-                    {
-
-                        double denom = (double)dataB[j*stepB]*dataB[j*stepB] +
-                                       (double)dataB[(j+1)*stepB]*dataB[(j+1)*stepB] + (double)eps;
-
-                        double re = (double)dataA[j*stepA]*dataB[j*stepB] -
-                                    (double)dataA[(j+1)*stepA]*dataB[(j+1)*stepB];
-
-                        double im = (double)dataA[(j+1)*stepA]*dataB[j*stepB] +
-                                    (double)dataA[j*stepA]*dataB[(j+1)*stepB];
-
-                        dataC[j*stepC] = (float)(re / denom);
-                        dataC[(j+1)*stepC] = (float)(im / denom);
-                    }
-                if( k == 1 )
-                    dataA -= cols - 1, dataB -= cols - 1, dataC -= cols - 1;
-            }
-        }
-
-        for( ; rows--; dataA += stepA, dataB += stepB, dataC += stepC )
-        {
-            if( is_1d && cn == 1 )
-            {
-                dataC[0] = dataA[0] / (dataB[0] + eps);
-                if( cols % 2 == 0 )
-                    dataC[j1] = dataA[j1] / (dataB[j1] + eps);
-            }
-
-            if( !conjB )
-                for( j = j0; j < j1; j += 2 )
-                {
-                    double denom = (double)(dataB[j]*dataB[j] + dataB[j+1]*dataB[j+1] + eps);
-                    double re = (double)(dataA[j]*dataB[j] + dataA[j+1]*dataB[j+1]);
-                    double im = (double)(dataA[j+1]*dataB[j] - dataA[j]*dataB[j+1]);
-                    dataC[j] = (float)(re / denom);
-                    dataC[j+1] = (float)(im / denom);
-                }
-            else
-                for( j = j0; j < j1; j += 2 )
-                {
-                    double denom = (double)(dataB[j]*dataB[j] + dataB[j+1]*dataB[j+1] + eps);
-                    double re = (double)(dataA[j]*dataB[j] - dataA[j+1]*dataB[j+1]);
-                    double im = (double)(dataA[j+1]*dataB[j] + dataA[j]*dataB[j+1]);
-                    dataC[j] = (float)(re / denom);
-                    dataC[j+1] = (float)(im / denom);
-                }
-        }
-    }
-    else
-    {
-        const double* dataA = (const double*)srcA.data;
-        const double* dataB = (const double*)srcB.data;
-        double* dataC = (double*)dst.data;
-        double eps = DBL_EPSILON; // prevent div0 problems
-
-        size_t stepA = srcA.step/sizeof(dataA[0]);
-        size_t stepB = srcB.step/sizeof(dataB[0]);
-        size_t stepC = dst.step/sizeof(dataC[0]);
-
-        if( !is_1d && cn == 1 )
-        {
-            for( k = 0; k < (cols % 2 ? 1 : 2); k++ )
-            {
-                if( k == 1 )
-                    dataA += cols - 1, dataB += cols - 1, dataC += cols - 1;
-                dataC[0] = dataA[0] / (dataB[0] + eps);
-                if( rows % 2 == 0 )
-                    dataC[(rows-1)*stepC] = dataA[(rows-1)*stepA] / (dataB[(rows-1)*stepB] + eps);
-                if( !conjB )
-                    for( j = 1; j <= rows - 2; j += 2 )
-                    {
-                        double denom = dataB[j*stepB]*dataB[j*stepB] +
-                                       dataB[(j+1)*stepB]*dataB[(j+1)*stepB] + eps;
-
-                        double re = dataA[j*stepA]*dataB[j*stepB] +
-                                    dataA[(j+1)*stepA]*dataB[(j+1)*stepB];
-
-                        double im = dataA[(j+1)*stepA]*dataB[j*stepB] -
-                                    dataA[j*stepA]*dataB[(j+1)*stepB];
-
-                        dataC[j*stepC] = re / denom;
-                        dataC[(j+1)*stepC] = im / denom;
-                    }
-                else
-                    for( j = 1; j <= rows - 2; j += 2 )
-                    {
-                        double denom = dataB[j*stepB]*dataB[j*stepB] +
-                                       dataB[(j+1)*stepB]*dataB[(j+1)*stepB] + eps;
-
-                        double re = dataA[j*stepA]*dataB[j*stepB] -
-                                    dataA[(j+1)*stepA]*dataB[(j+1)*stepB];
-
-                        double im = dataA[(j+1)*stepA]*dataB[j*stepB] +
-                                    dataA[j*stepA]*dataB[(j+1)*stepB];
-
-                        dataC[j*stepC] = re / denom;
-                        dataC[(j+1)*stepC] = im / denom;
-                    }
-                if( k == 1 )
-                    dataA -= cols - 1, dataB -= cols - 1, dataC -= cols - 1;
-            }
-        }
-
-        for( ; rows--; dataA += stepA, dataB += stepB, dataC += stepC )
-        {
-            if( is_1d && cn == 1 )
-            {
-                dataC[0] = dataA[0] / (dataB[0] + eps);
-                if( cols % 2 == 0 )
-                    dataC[j1] = dataA[j1] / (dataB[j1] + eps);
-            }
-
-            if( !conjB )
-                for( j = j0; j < j1; j += 2 )
-                {
-                    double denom = dataB[j]*dataB[j] + dataB[j+1]*dataB[j+1] + eps;
-                    double re = dataA[j]*dataB[j] + dataA[j+1]*dataB[j+1];
-                    double im = dataA[j+1]*dataB[j] - dataA[j]*dataB[j+1];
-                    dataC[j] = re / denom;
-                    dataC[j+1] = im / denom;
-                }
-            else
-                for( j = j0; j < j1; j += 2 )
-                {
-                    double denom = dataB[j]*dataB[j] + dataB[j+1]*dataB[j+1] + eps;
-                    double re = dataA[j]*dataB[j] - dataA[j+1]*dataB[j+1];
-                    double im = dataA[j+1]*dataB[j] + dataA[j]*dataB[j+1];
-                    dataC[j] = re / denom;
-                    dataC[j+1] = im / denom;
-                }
-        }
-    }
-
 }
 
 static void fftShift(InputOutputArray _out)
@@ -369,37 +179,57 @@ static void fftShift(InputOutputArray _out)
 
     if(is_1d)
     {
+        int is_odd = (xMid > 0 && out.cols % 2 == 1) || (yMid > 0 && out.rows % 2 == 1);
         xMid = xMid + yMid;
 
         for(size_t i = 0; i < planes.size(); i++)
         {
             Mat tmp;
-            Mat half0(planes[i], Rect(0, 0, xMid, 1));
-            Mat half1(planes[i], Rect(xMid, 0, xMid, 1));
+            Mat half0(planes[i], Rect(0, 0, xMid + is_odd, 1));
+            Mat half1(planes[i], Rect(xMid + is_odd, 0, xMid, 1));
 
             half0.copyTo(tmp);
-            half1.copyTo(half0);
-            tmp.copyTo(half1);
+            half1.copyTo(planes[i](Rect(0, 0, xMid, 1)));
+            tmp.copyTo(planes[i](Rect(xMid, 0, xMid + is_odd, 1)));
         }
     }
     else
     {
+        int isXodd = out.cols % 2 == 1;
+        int isYodd = out.rows % 2 == 1;
         for(size_t i = 0; i < planes.size(); i++)
         {
             // perform quadrant swaps...
-            Mat tmp;
-            Mat q0(planes[i], Rect(0,    0,    xMid, yMid));
-            Mat q1(planes[i], Rect(xMid, 0,    xMid, yMid));
-            Mat q2(planes[i], Rect(0,    yMid, xMid, yMid));
-            Mat q3(planes[i], Rect(xMid, yMid, xMid, yMid));
+            Mat q0(planes[i], Rect(0,    0,    xMid + isXodd, yMid + isYodd));
+            Mat q1(planes[i], Rect(xMid + isXodd, 0,    xMid, yMid + isYodd));
+            Mat q2(planes[i], Rect(0,    yMid + isYodd, xMid + isXodd, yMid));
+            Mat q3(planes[i], Rect(xMid + isXodd, yMid + isYodd, xMid, yMid));
 
-            q0.copyTo(tmp);
-            q3.copyTo(q0);
-            tmp.copyTo(q3);
+            if(!(isXodd || isYodd))
+            {
+                Mat tmp;
+                q0.copyTo(tmp);
+                q3.copyTo(q0);
+                tmp.copyTo(q3);
 
-            q1.copyTo(tmp);
-            q2.copyTo(q1);
-            tmp.copyTo(q2);
+                q1.copyTo(tmp);
+                q2.copyTo(q1);
+                tmp.copyTo(q2);
+            }
+            else
+            {
+                Mat tmp0, tmp1, tmp2 ,tmp3;
+                q0.copyTo(tmp0);
+                q1.copyTo(tmp1);
+                q2.copyTo(tmp2);
+                q3.copyTo(tmp3);
+
+                tmp0.copyTo(planes[i](Rect(xMid, yMid, xMid + isXodd, yMid + isYodd)));
+                tmp3.copyTo(planes[i](Rect(0, 0, xMid, yMid)));
+
+                tmp1.copyTo(planes[i](Rect(0, yMid, xMid, yMid + isYodd)));
+                tmp2.copyTo(planes[i](Rect(xMid, 0, xMid + isXodd, yMid)));
+            }
         }
     }
 
@@ -444,7 +274,7 @@ static Point2d weightedCentroid(InputArray _src, cv::Point peakLocation, cv::Siz
 
     if(type == CV_32FC1)
     {
-        const float* dataIn = (const float*)src.data;
+        const float* dataIn = src.ptr<float>();
         dataIn += minr*src.cols;
         for(int y = minr; y <= maxr; y++)
         {
@@ -460,7 +290,7 @@ static Point2d weightedCentroid(InputArray _src, cv::Point peakLocation, cv::Siz
     }
     else
     {
-        const double* dataIn = (const double*)src.data;
+        const double* dataIn = src.ptr<double>();
         dataIn += minr*src.cols;
         for(int y = minr; y <= maxr; y++)
         {
@@ -490,6 +320,8 @@ static Point2d weightedCentroid(InputArray _src, cv::Point peakLocation, cv::Siz
 
 cv::Point2d cv::phaseCorrelate(InputArray _src1, InputArray _src2, InputArray _window, double* response)
 {
+    CV_INSTRUMENT_REGION();
+
     Mat src1 = _src1.getMat();
     Mat src2 = _src2.getMat();
     Mat window = _window.getMat();
@@ -571,25 +403,60 @@ cv::Point2d cv::phaseCorrelate(InputArray _src1, InputArray _src2, InputArray _w
 
 void cv::createHanningWindow(OutputArray _dst, cv::Size winSize, int type)
 {
+    CV_INSTRUMENT_REGION();
+
     CV_Assert( type == CV_32FC1 || type == CV_64FC1 );
+    CV_Assert( winSize.width > 1 && winSize.height > 1 );
 
     _dst.create(winSize, type);
     Mat dst = _dst.getMat();
 
-    int rows = dst.rows;
-    int cols = dst.cols;
+    int rows = dst.rows, cols = dst.cols;
+
+    AutoBuffer<double> _wc(cols);
+    double* const wc = _wc.data();
+
+    double coeff0 = 2.0 * CV_PI / (double)(cols - 1), coeff1 = 2.0 * CV_PI / (double)(rows - 1);
+    int c = 0;
+#if CV_SIMD_64F || CV_SIMD_SCALABLE_64F
+    const int nlanes32 = VTraits<v_float32>::vlanes();
+    const int nlanes64 = VTraits<v_float64>::vlanes();
+    const int max_nlanes = VTraits<v_float64>::max_nlanes;
+    std::array<double, max_nlanes> index;
+    std::iota(index.data(), index.data()+max_nlanes, 0.f);
+    v_float64 vindex = vx_load(index.data());
+    v_float64 delta = vx_setall_f64(VTraits<v_float64>::vlanes());
+    v_float64 vcoeff0 = vx_setall_f64(coeff0);
+    v_float64 one = vx_setall_f64(1.f);
+    v_float64 half = vx_setall_f64(0.5f);
+    for (; c <= cols - nlanes64; c += nlanes64)
+    {
+        v_float64 v = v_mul(half, v_sub(one, v_cos(v_mul(vcoeff0, vindex))));
+        vx_store(wc + c, v);
+        vindex = v_add(vindex, delta);
+    }
+#endif
+    for(; c < cols; c++)
+        wc[c] = 0.5 * (1.0 - cos(coeff0 * c));
 
     if(dst.depth() == CV_32F)
     {
         for(int i = 0; i < rows; i++)
         {
             float* dstData = dst.ptr<float>(i);
-            double wr = 0.5 * (1.0f - cos(2.0f * CV_PI * (double)i / (double)(rows - 1)));
-            for(int j = 0; j < cols; j++)
+            double wr = 0.5 * (1.0 - cos(coeff1 * i));
+            int j = 0;
+#if CV_SIMD_64F || CV_SIMD_SCALABLE_64F
+            v_float64 vwr = vx_setall_f64(wr);
+            for (; j <= cols - nlanes32; j += nlanes32)
             {
-                double wc = 0.5 * (1.0f - cos(2.0f * CV_PI * (double)j / (double)(cols - 1)));
-                dstData[j] = (float)(wr * wc);
+                v_float64 v0 = v_mul(vwr, vx_load(wc + j));
+                v_float64 v1 = v_mul(vwr, vx_load(wc + j + nlanes64));
+                vx_store(dstData + j, v_cvt_f32(v0, v1));
             }
+#endif
+            for(; j < cols; j++)
+                dstData[j] = (float)(wr * wc[j]);
         }
     }
     else
@@ -597,12 +464,18 @@ void cv::createHanningWindow(OutputArray _dst, cv::Size winSize, int type)
         for(int i = 0; i < rows; i++)
         {
             double* dstData = dst.ptr<double>(i);
-            double wr = 0.5 * (1.0 - cos(2.0 * CV_PI * (double)i / (double)(rows - 1)));
-            for(int j = 0; j < cols; j++)
+            double wr = 0.5 * (1.0 - cos(coeff1 * i));
+            int j = 0;
+#if CV_SIMD_64F || CV_SIMD_SCALABLE_64F
+            v_float64 vwr = vx_setall_f64(wr);
+            for (; j <= cols - nlanes64; j += nlanes64)
             {
-                double wc = 0.5 * (1.0 - cos(2.0 * CV_PI * (double)j / (double)(cols - 1)));
-                dstData[j] = wr * wc;
+                v_float64 v = v_mul(vwr, vx_load(wc + j));
+                vx_store(dstData + j, v);
             }
+#endif
+            for(; j < cols; j++)
+                dstData[j] = wr * wc[j];
         }
     }
 

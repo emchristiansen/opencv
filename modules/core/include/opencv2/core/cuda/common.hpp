@@ -40,13 +40,19 @@
 //
 //M*/
 
-#ifndef __OPENCV_CUDA_COMMON_HPP__
-#define __OPENCV_CUDA_COMMON_HPP__
+#ifndef OPENCV_CUDA_COMMON_HPP
+#define OPENCV_CUDA_COMMON_HPP
 
 #include <cuda_runtime.h>
 #include "opencv2/core/cuda_types.hpp"
 #include "opencv2/core/cvdef.h"
 #include "opencv2/core/base.hpp"
+
+/** @file
+ * @deprecated Use @ref cudev instead.
+ */
+
+//! @cond IGNORED
 
 #ifndef CV_PI_F
     #ifndef CV_PI
@@ -57,29 +63,27 @@
 #endif
 
 namespace cv { namespace cuda {
-    static inline void checkCudaError(cudaError_t err, const char* file, const int line, const char* func)
+    inline void checkCudaError(cudaError_t err, const char* file, const int line, const char* func)
     {
-        if (cudaSuccess != err)
+        if (cudaSuccess != err) {
+            cudaGetLastError(); // reset the last stored error to cudaSuccess
             cv::error(cv::Error::GpuApiCallError, cudaGetErrorString(err), func, file, line);
+        }
     }
 }}
 
 #ifndef cudaSafeCall
-    #if defined(__GNUC__)
-        #define cudaSafeCall(expr)  cv::cuda::checkCudaError(expr, __FILE__, __LINE__, __func__)
-    #else /* defined(__CUDACC__) || defined(__MSVC__) */
-        #define cudaSafeCall(expr)  cv::cuda::checkCudaError(expr, __FILE__, __LINE__, "")
-    #endif
+    #define cudaSafeCall(expr)  cv::cuda::checkCudaError(expr, __FILE__, __LINE__, CV_Func)
 #endif
 
 namespace cv { namespace cuda
 {
-    template <typename T> static inline bool isAligned(const T* ptr, size_t size)
+    template <typename T> inline bool isAligned(const T* ptr, size_t size)
     {
         return reinterpret_cast<size_t>(ptr) % size == 0;
     }
 
-    static inline bool isAligned(size_t step, size_t size)
+    inline bool isAligned(size_t step, size_t size)
     {
         return step % size == 0;
     }
@@ -93,15 +97,9 @@ namespace cv { namespace cuda
         {
             return (total + grain - 1) / grain;
         }
-
-        template<class T> inline void bindTexture(const textureReference* tex, const PtrStepSz<T>& img)
-        {
-            cudaChannelFormatDesc desc = cudaCreateChannelDesc<T>();
-            cudaSafeCall( cudaBindTexture2D(0, tex, img.ptr(), &desc, img.cols, img.rows, img.step) );
-        }
     }
 }}
 
+//! @endcond
 
-
-#endif // __OPENCV_CUDA_COMMON_HPP__
+#endif // OPENCV_CUDA_COMMON_HPP
