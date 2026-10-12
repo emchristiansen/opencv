@@ -50,10 +50,112 @@
 
 #include "opencv2/core/cuda.hpp"
 #include "opencv2/cudev.hpp"
+#include "opencv2/core/cuda/utility.hpp"
+#include "opencv2/core/cuda/cuda_compat.hpp"
 
 using namespace cv;
 using namespace cv::cuda;
 using namespace cv::cudev;
+using cv::cuda::device::compat::double4Compat;
+
+device::ThrustAllocator::~ThrustAllocator()
+{
+}
+namespace
+{
+    class DefaultThrustAllocator: public cv::cuda::device::ThrustAllocator
+    {
+    public:
+        __device__ __host__ uchar* allocate(size_t numBytes) CV_OVERRIDE
+        {
+#ifndef __CUDA_ARCH__
+            uchar* ptr;
+            CV_CUDEV_SAFE_CALL(cudaMalloc(&ptr, numBytes));
+            return ptr;
+#else
+            return NULL;
+#endif
+        }
+        __device__ __host__ void deallocate(uchar* ptr, size_t numBytes) CV_OVERRIDE
+        {
+            CV_UNUSED(numBytes);
+#ifndef __CUDA_ARCH__
+            CV_CUDEV_SAFE_CALL(cudaFree(ptr));
+#endif
+        }
+    };
+    DefaultThrustAllocator defaultThrustAllocator;
+    cv::cuda::device::ThrustAllocator* g_thrustAllocator = &defaultThrustAllocator;
+}
+
+
+cv::cuda::device::ThrustAllocator& cv::cuda::device::ThrustAllocator::getAllocator()
+{
+    return *g_thrustAllocator;
+}
+
+void cv::cuda::device::ThrustAllocator::setAllocator(cv::cuda::device::ThrustAllocator* allocator)
+{
+    if(allocator == NULL)
+        g_thrustAllocator = &defaultThrustAllocator;
+    else
+        g_thrustAllocator = allocator;
+}
+
+namespace
+{
+    class DefaultAllocator : public GpuMat::Allocator
+    {
+    public:
+        bool allocate(GpuMat* mat, int rows, int cols, size_t elemSize) CV_OVERRIDE;
+        void free(GpuMat* mat) CV_OVERRIDE;
+    };
+
+    bool DefaultAllocator::allocate(GpuMat* mat, int rows, int cols, size_t elemSize)
+    {
+        if (rows > 1 && cols > 1)
+        {
+            CV_CUDEV_SAFE_CALL( cudaMallocPitch(&mat->data, &mat->step, elemSize * cols, rows) );
+        }
+        else
+        {
+            // Single row or single column must be continuous
+            CV_CUDEV_SAFE_CALL( cudaMalloc(&mat->data, elemSize * cols * rows) );
+            mat->step = elemSize * cols;
+        }
+
+        mat->refcount = (int*) fastMalloc(sizeof(int));
+
+        return true;
+    }
+
+    void DefaultAllocator::free(GpuMat* mat)
+    {
+        cudaFree(mat->datastart);
+        fastFree(mat->refcount);
+    }
+
+    DefaultAllocator cudaDefaultAllocator;
+    GpuMat::Allocator* g_defaultAllocator = &cudaDefaultAllocator;
+    GpuMat::Allocator* g_stdAllocator = &cudaDefaultAllocator;
+}
+
+GpuMat::Allocator* cv::cuda::GpuMat::defaultAllocator()
+{
+    return g_defaultAllocator;
+}
+
+void cv::cuda::GpuMat::setDefaultAllocator(Allocator* allocator)
+{
+    CV_Assert( allocator != 0 );
+    g_defaultAllocator = allocator;
+}
+
+GpuMat::Allocator* cv::cuda::GpuMat::getStdAllocator()
+{
+    return g_stdAllocator;
+}
+
 
 /////////////////////////////////////////////////////
 /// create
@@ -76,32 +178,26 @@ void cv::cuda::GpuMat::create(int _rows, int _cols, int _type)
         rows = _rows;
         cols = _cols;
 
-        size_t esz = elemSize();
+        const size_t esz = elemSize();
 
-        void* devPtr;
+        bool allocSuccess = allocator->allocate(this, rows, cols, esz);
 
-        if (rows > 1 && cols > 1)
+        if (!allocSuccess)
         {
-            CV_CUDEV_SAFE_CALL( cudaMallocPitch(&devPtr, &step, esz * cols, rows) );
-        }
-        else
-        {
-            // Single row or single column must be continuous
-            CV_CUDEV_SAFE_CALL( cudaMalloc(&devPtr, esz * cols * rows) );
-            step = esz * cols;
+            // custom allocator fails, try default allocator
+            allocator = defaultAllocator();
+            allocSuccess = allocator->allocate(this, rows, cols, esz);
+            CV_Assert( allocSuccess );
         }
 
         if (esz * cols == step)
             flags |= Mat::CONTINUOUS_FLAG;
 
-        int64 _nettosize = static_cast<int64>(step) * rows;
-        size_t nettosize = static_cast<size_t>(_nettosize);
+        datastart = data;
+        dataend = data + step * (rows - 1) + cols * esz;
 
-        datastart = data = static_cast<uchar*>(devPtr);
-        dataend = data + nettosize;
-
-        refcount = static_cast<int*>(fastMalloc(sizeof(*refcount)));
-        *refcount = 1;
+        if (refcount)
+            *refcount = 1;
     }
 }
 
@@ -110,13 +206,12 @@ void cv::cuda::GpuMat::create(int _rows, int _cols, int _type)
 
 void cv::cuda::GpuMat::release()
 {
-    if (refcount && CV_XADD(refcount, -1) == 1)
-    {
-        cudaFree(datastart);
-        fastFree(refcount);
-    }
+    CV_DbgAssert( allocator != 0 );
 
-    data = datastart = dataend = 0;
+    if (refcount && CV_XADD(refcount, -1) == 1)
+        allocator->free(this);
+
+    dataend = data = datastart = 0;
     step = rows = cols = 0;
     refcount = 0;
 }
@@ -156,8 +251,10 @@ void cv::cuda::GpuMat::download(OutputArray _dst) const
 
     _dst.create(size(), type());
     Mat dst = _dst.getMat();
+    size_t widthBytes = cols * elemSize();
+    size_t dstep = rows > 1 ? (size_t)dst.step : widthBytes;
 
-    CV_CUDEV_SAFE_CALL( cudaMemcpy2D(dst.data, dst.step, data, step, cols * elemSize(), rows, cudaMemcpyDeviceToHost) );
+    CV_CUDEV_SAFE_CALL( cudaMemcpy2D(dst.data, dstep, data, step, widthBytes, rows, cudaMemcpyDeviceToHost));
 }
 
 void cv::cuda::GpuMat::download(OutputArray _dst, Stream& _stream) const
@@ -216,7 +313,7 @@ namespace
     template <typename T>
     void copyWithMask(const GpuMat& src, const GpuMat& dst, const GpuMat& mask, Stream& stream)
     {
-        gridTransform_< CopyToPolicy<sizeof(typename VecTraits<T>::elem_type)> >(globPtr<T>(src), globPtr<T>(dst), identity<T>(), globPtr<uchar>(mask), stream);
+        gridTransformUnary_< CopyToPolicy<sizeof(typename VecTraits<T>::elem_type)> >(globPtr<T>(src), globPtr<T>(dst), identity<T>(), globPtr<uchar>(mask), stream);
     }
 }
 
@@ -228,8 +325,14 @@ void cv::cuda::GpuMat::copyTo(OutputArray _dst, InputArray _mask, Stream& stream
     GpuMat mask = _mask.getGpuMat();
     CV_DbgAssert( size() == mask.size() && mask.depth() == CV_8U && (mask.channels() == 1 || mask.channels() == channels()) );
 
+    uchar* data0 = _dst.getGpuMat().data;
+
     _dst.create(size(), type());
     GpuMat dst = _dst.getGpuMat();
+
+    // do not leave dst uninitialized
+    if (dst.data != data0)
+        dst.setTo(Scalar::all(0), stream);
 
     typedef void (*func_t)(const GpuMat& src, const GpuMat& dst, const GpuMat& mask, Stream& stream);
     static const func_t funcs[9][4] =
@@ -242,7 +345,7 @@ void cv::cuda::GpuMat::copyTo(OutputArray _dst, InputArray _mask, Stream& stream
         {0,0,0,0},
         {0,0,0,0},
         {0,0,0,0},
-        {copyWithMask<double>, copyWithMask<double2>, copyWithMask<double3>, copyWithMask<double4>}
+        {copyWithMask<double>, copyWithMask<double2>, copyWithMask<double3>, copyWithMask<double4Compat>}
     };
 
     if (mask.channels() == channels())
@@ -268,14 +371,14 @@ namespace
     void setToWithOutMask(const GpuMat& mat, Scalar _scalar, Stream& stream)
     {
         Scalar_<typename VecTraits<T>::elem_type> scalar = _scalar;
-        gridTransform(constantPtr(VecTraits<T>::make(scalar.val), mat.rows, mat.cols), globPtr<T>(mat), identity<T>(), stream);
+        gridTransformUnary(constantPtr(VecTraits<T>::make(scalar.val), mat.rows, mat.cols), globPtr<T>(mat), identity<T>(), stream);
     }
 
     template <typename T>
     void setToWithMask(const GpuMat& mat, const GpuMat& mask, Scalar _scalar, Stream& stream)
     {
         Scalar_<typename VecTraits<T>::elem_type> scalar = _scalar;
-        gridTransform(constantPtr(VecTraits<T>::make(scalar.val), mat.rows, mat.cols), globPtr<T>(mat), identity<T>(), globPtr<uchar>(mask), stream);
+        gridTransformUnary(constantPtr(VecTraits<T>::make(scalar.val), mat.rows, mat.cols), globPtr<T>(mat), identity<T>(), globPtr<uchar>(mask), stream);
     }
 }
 
@@ -325,7 +428,7 @@ GpuMat& cv::cuda::GpuMat::setTo(Scalar value, Stream& stream)
         {setToWithOutMask<short>,setToWithOutMask<short2>,setToWithOutMask<short3>,setToWithOutMask<short4>},
         {setToWithOutMask<int>,setToWithOutMask<int2>,setToWithOutMask<int3>,setToWithOutMask<int4>},
         {setToWithOutMask<float>,setToWithOutMask<float2>,setToWithOutMask<float3>,setToWithOutMask<float4>},
-        {setToWithOutMask<double>,setToWithOutMask<double2>,setToWithOutMask<double3>,setToWithOutMask<double4>}
+        {setToWithOutMask<double>,setToWithOutMask<double2>,setToWithOutMask<double3>,setToWithOutMask<double4Compat>}
     };
 
     funcs[depth()][channels() - 1](*this, value, stream);
@@ -340,6 +443,11 @@ GpuMat& cv::cuda::GpuMat::setTo(Scalar value, InputArray _mask, Stream& stream)
 
     GpuMat mask = _mask.getGpuMat();
 
+    if (mask.empty())
+    {
+        return setTo(value, stream);
+    }
+
     CV_DbgAssert( size() == mask.size() && mask.type() == CV_8UC1 );
 
     typedef void (*func_t)(const GpuMat& mat, const GpuMat& mask, Scalar scalar, Stream& stream);
@@ -351,7 +459,7 @@ GpuMat& cv::cuda::GpuMat::setTo(Scalar value, InputArray _mask, Stream& stream)
         {setToWithMask<short>,setToWithMask<short2>,setToWithMask<short3>,setToWithMask<short4>},
         {setToWithMask<int>,setToWithMask<int2>,setToWithMask<int3>,setToWithMask<int4>},
         {setToWithMask<float>,setToWithMask<float2>,setToWithMask<float3>,setToWithMask<float4>},
-        {setToWithMask<double>,setToWithMask<double2>,setToWithMask<double3>,setToWithMask<double4>}
+        {setToWithMask<double>,setToWithMask<double2>,setToWithMask<double3>,setToWithMask<double4Compat>}
     };
 
     funcs[depth()][channels() - 1](*this, mask, value, stream);
@@ -382,7 +490,7 @@ namespace
         typedef typename LargerType<src_elem_type, float>::type larger_elem_type;
         typedef typename LargerType<float, dst_elem_type>::type scalar_type;
 
-        gridTransform_< ConvertToPolicy<scalar_type> >(globPtr<T>(src), globPtr<D>(dst), saturate_cast_func<T, D>(), stream);
+        gridTransformUnary_< ConvertToPolicy<scalar_type> >(globPtr<T>(src), globPtr<D>(dst), saturate_cast_func<T, D>(), stream);
     }
 
     template <typename T, typename D, typename S> struct Convertor : unary_function<T, D>
@@ -408,7 +516,18 @@ namespace
         op.alpha = cv::saturate_cast<scalar_type>(alpha);
         op.beta = cv::saturate_cast<scalar_type>(beta);
 
-        gridTransform_< ConvertToPolicy<scalar_type> >(globPtr<T>(src), globPtr<D>(dst), op, stream);
+        gridTransformUnary_< ConvertToPolicy<scalar_type> >(globPtr<T>(src), globPtr<D>(dst), op, stream);
+    }
+
+    template <typename T, typename D>
+    void convertScaleHalf(const GpuMat& src, const GpuMat& dst, Stream& stream)
+    {
+        typedef typename VecTraits<T>::elem_type src_elem_type;
+        typedef typename VecTraits<D>::elem_type dst_elem_type;
+        typedef typename LargerType<src_elem_type, float>::type larger_elem_type;
+        typedef typename LargerType<float, dst_elem_type>::type scalar_type;
+
+        gridTransformUnary_< ConvertToPolicy<scalar_type> >(globPtr<T>(src), globPtr<D>(dst), saturate_cast_fp16_func<T,D>(), stream);
     }
 }
 
@@ -431,7 +550,7 @@ void cv::cuda::GpuMat::convertTo(OutputArray _dst, int rtype, Stream& stream) co
         return;
     }
 
-    CV_DbgAssert( sdepth <= CV_64F && ddepth <= CV_64F );
+    CV_Assert(sdepth < CV_DEPTH_CURR_MAX && ddepth < CV_DEPTH_CURR_MAX);
 
     GpuMat src = *this;
 
@@ -439,18 +558,27 @@ void cv::cuda::GpuMat::convertTo(OutputArray _dst, int rtype, Stream& stream) co
     GpuMat dst = _dst.getGpuMat();
 
     typedef void (*func_t)(const GpuMat& src, const GpuMat& dst, Stream& stream);
-    static const func_t funcs[7][7] =
+    static const func_t funcs[CV_DEPTH_CURR_MAX][CV_DEPTH_CURR_MAX] =
     {
-        {0, convertToNoScale<uchar, schar>, convertToNoScale<uchar, ushort>, convertToNoScale<uchar, short>, convertToNoScale<uchar, int>, convertToNoScale<uchar, float>, convertToNoScale<uchar, double>},
-        {convertToNoScale<schar, uchar>, 0, convertToNoScale<schar, ushort>, convertToNoScale<schar, short>, convertToNoScale<schar, int>, convertToNoScale<schar, float>, convertToNoScale<schar, double>},
-        {convertToNoScale<ushort, uchar>, convertToNoScale<ushort, schar>, 0, convertToNoScale<ushort, short>, convertToNoScale<ushort, int>, convertToNoScale<ushort, float>, convertToNoScale<ushort, double>},
-        {convertToNoScale<short, uchar>, convertToNoScale<short, schar>, convertToNoScale<short, ushort>, 0, convertToNoScale<short, int>, convertToNoScale<short, float>, convertToNoScale<short, double>},
-        {convertToNoScale<int, uchar>, convertToNoScale<int, schar>, convertToNoScale<int, ushort>, convertToNoScale<int, short>, 0, convertToNoScale<int, float>, convertToNoScale<int, double>},
-        {convertToNoScale<float, uchar>, convertToNoScale<float, schar>, convertToNoScale<float, ushort>, convertToNoScale<float, short>, convertToNoScale<float, int>, 0, convertToNoScale<float, double>},
-        {convertToNoScale<double, uchar>, convertToNoScale<double, schar>, convertToNoScale<double, ushort>, convertToNoScale<double, short>, convertToNoScale<double, int>, convertToNoScale<double, float>, 0}
+        {0, convertToNoScale<uchar, schar>, convertToNoScale<uchar, ushort>, convertToNoScale<uchar, short>, convertToNoScale<uchar, int>, convertToNoScale<uchar, float>, convertToNoScale<uchar, double>, 0, 0, 0, convertToNoScale<uchar, uint64_t>, convertToNoScale<uchar, int64_t>, convertToNoScale<uchar, uint32_t>},
+        {convertToNoScale<schar, uchar>, 0, convertToNoScale<schar, ushort>, convertToNoScale<schar, short>, convertToNoScale<schar, int>, convertToNoScale<schar, float>, convertToNoScale<schar, double>, 0, 0, 0, convertToNoScale<schar, uint64_t>, convertToNoScale<schar, int64_t>, convertToNoScale<schar, uint32_t>},
+        {convertToNoScale<ushort, uchar>, convertToNoScale<ushort, schar>, 0, convertToNoScale<ushort, short>, convertToNoScale<ushort, int>, convertToNoScale<ushort, float>, convertToNoScale<ushort, double>, 0, 0, 0, convertToNoScale<ushort, uint64_t>, convertToNoScale<ushort, int64_t>, convertToNoScale<ushort, uint32_t>},
+        {convertToNoScale<short, uchar>, convertToNoScale<short, schar>, convertToNoScale<short, ushort>, 0, convertToNoScale<short, int>, convertToNoScale<short, float>, convertToNoScale<short, double>, 0, 0, 0, convertToNoScale<short, uint64_t>, convertToNoScale<short, int64_t>, convertToNoScale<short, uint32_t>},
+        {convertToNoScale<int, uchar>, convertToNoScale<int, schar>, convertToNoScale<int, ushort>, convertToNoScale<int, short>, 0, convertToNoScale<int, float>, convertToNoScale<int, double>, 0, 0, 0, convertToNoScale<int, uint64_t>, convertToNoScale<int, int64_t>, convertToNoScale<int, uint32_t>},
+        {convertToNoScale<float, uchar>, convertToNoScale<float, schar>, convertToNoScale<float, ushort>, convertToNoScale<float, short>, convertToNoScale<float, int>, 0, convertToNoScale<float, double>, convertScaleHalf<float, short>, 0, 0, convertToNoScale<float, uint64_t>, convertToNoScale<float, int64_t>, convertToNoScale<float, uint32_t>},
+        {convertToNoScale<double, uchar>, convertToNoScale<double, schar>, convertToNoScale<double, ushort>, convertToNoScale<double, short>, convertToNoScale<double, int>, convertToNoScale<double, float>, 0, 0, 0, 0, convertToNoScale<double, uint64_t>, convertToNoScale<double, int64_t>, convertToNoScale<double, uint32_t>},
+        {0, 0, 0, 0, 0, convertScaleHalf<short, float>, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {convertToNoScale<uint64_t, uchar>, convertToNoScale<uint64_t, schar>, convertToNoScale<uint64_t, ushort>, convertToNoScale<uint64_t, short>, convertToNoScale<uint64_t, int>, convertToNoScale<uint64_t, float>, convertToNoScale<uint64_t, double>, 0, 0, 0, 0, convertToNoScale<uint64_t, int64_t>, convertToNoScale<uint64_t, uint32_t>},
+        {convertToNoScale<int64_t, uchar>, convertToNoScale<int64_t, schar>, convertToNoScale<int64_t, ushort>, convertToNoScale<int64_t, short>, convertToNoScale<int64_t, int>, convertToNoScale<int64_t, float>, convertToNoScale<int64_t, double>, 0, 0, 0, convertToNoScale<int64_t, uint64_t>, 0, convertToNoScale<int64_t, uint32_t>},
+        {convertToNoScale<uint32_t, uchar>, convertToNoScale<uint32_t, schar>, convertToNoScale<uint32_t, ushort>, convertToNoScale<uint32_t, short>, convertToNoScale<uint32_t, int>, convertToNoScale<uint32_t, float>, convertToNoScale<uint32_t, double>, 0, 0, 0, convertToNoScale<uint32_t, uint64_t>, convertToNoScale<uint32_t, int64_t>, 0},
     };
 
-    funcs[sdepth][ddepth](reshape(1), dst.reshape(1), stream);
+    const func_t func = funcs[sdepth][ddepth];
+    CV_Assert(func);
+
+    func(src.reshape(1), dst.reshape(1), stream);
 }
 
 void cv::cuda::GpuMat::convertTo(OutputArray _dst, int rtype, double alpha, double beta, Stream& stream) const
@@ -463,24 +591,35 @@ void cv::cuda::GpuMat::convertTo(OutputArray _dst, int rtype, double alpha, doub
     const int sdepth = depth();
     const int ddepth = CV_MAT_DEPTH(rtype);
 
+    CV_Assert(sdepth < CV_DEPTH_CURR_MAX && ddepth < CV_DEPTH_CURR_MAX);
+
     GpuMat src = *this;
 
     _dst.create(size(), rtype);
     GpuMat dst = _dst.getGpuMat();
 
     typedef void (*func_t)(const GpuMat& src, const GpuMat& dst, double alpha, double beta, Stream& stream);
-    static const func_t funcs[7][7] =
+    static const func_t funcs[CV_DEPTH_CURR_MAX][CV_DEPTH_CURR_MAX] =
     {
-        {convertToScale<uchar, uchar>, convertToScale<uchar, schar>, convertToScale<uchar, ushort>, convertToScale<uchar, short>, convertToScale<uchar, int>, convertToScale<uchar, float>, convertToScale<uchar, double>},
-        {convertToScale<schar, uchar>, convertToScale<schar, schar>, convertToScale<schar, ushort>, convertToScale<schar, short>, convertToScale<schar, int>, convertToScale<schar, float>, convertToScale<schar, double>},
-        {convertToScale<ushort, uchar>, convertToScale<ushort, schar>, convertToScale<ushort, ushort>, convertToScale<ushort, short>, convertToScale<ushort, int>, convertToScale<ushort, float>, convertToScale<ushort, double>},
-        {convertToScale<short, uchar>, convertToScale<short, schar>, convertToScale<short, ushort>, convertToScale<short, short>, convertToScale<short, int>, convertToScale<short, float>, convertToScale<short, double>},
-        {convertToScale<int, uchar>, convertToScale<int, schar>, convertToScale<int, ushort>, convertToScale<int, short>, convertToScale<int, int>, convertToScale<int, float>, convertToScale<int, double>},
-        {convertToScale<float, uchar>, convertToScale<float, schar>, convertToScale<float, ushort>, convertToScale<float, short>, convertToScale<float, int>, convertToScale<float, float>, convertToScale<float, double>},
-        {convertToScale<double, uchar>, convertToScale<double, schar>, convertToScale<double, ushort>, convertToScale<double, short>, convertToScale<double, int>, convertToScale<double, float>, convertToScale<double, double>}
+        {convertToScale<uchar, uchar>, convertToScale<uchar, schar>, convertToScale<uchar, ushort>, convertToScale<uchar, short>, convertToScale<uchar, int>, convertToScale<uchar, float>, convertToScale<uchar, double>, 0, 0, 0, convertToScale<uchar, uint64_t>, convertToScale<uchar, int64_t>, convertToScale<uchar, uint32_t>},
+        {convertToScale<schar, uchar>, convertToScale<schar, schar>, convertToScale<schar, ushort>, convertToScale<schar, short>, convertToScale<schar, int>, convertToScale<schar, float>, convertToScale<schar, double>, 0, 0, 0, convertToScale<schar, uint64_t>, convertToScale<schar, int64_t>, convertToScale<schar, uint32_t>},
+        {convertToScale<ushort, uchar>, convertToScale<ushort, schar>, convertToScale<ushort, ushort>, convertToScale<ushort, short>, convertToScale<ushort, int>, convertToScale<ushort, float>, convertToScale<ushort, double>, 0, 0, 0, convertToScale<ushort, uint64_t>, convertToScale<ushort, int64_t>, convertToScale<ushort, uint32_t>},
+        {convertToScale<short, uchar>, convertToScale<short, schar>, convertToScale<short, ushort>, convertToScale<short, short>, convertToScale<short, int>, convertToScale<short, float>, convertToScale<short, double>, 0, 0, 0, convertToScale<short, uint64_t>, convertToScale<short, int64_t>, convertToScale<short, uint32_t>},
+        {convertToScale<int, uchar>, convertToScale<int, schar>, convertToScale<int, ushort>, convertToScale<int, short>, convertToScale<int, int>, convertToScale<int, float>, convertToScale<int, double>, 0, 0, 0, convertToScale<int, uint64_t>, convertToScale<int, int64_t>, convertToScale<int, uint32_t>},
+        {convertToScale<float, uchar>, convertToScale<float, schar>, convertToScale<float, ushort>, convertToScale<float, short>, convertToScale<float, int>, convertToScale<float, float>, convertToScale<float, double>, 0, 0, 0, convertToScale<float, uint64_t>, convertToScale<float, int64_t>, convertToScale<float, uint32_t>},
+        {convertToScale<double, uchar>, convertToScale<double, schar>, convertToScale<double, ushort>, convertToScale<double, short>, convertToScale<double, int>, convertToScale<double, float>, convertToScale<double, double>, 0, 0, 0, convertToScale<double, uint64_t>, convertToScale<double, int64_t>, convertToScale<double, uint32_t>},
+        {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+        {convertToScale<uint64_t, uchar>, convertToScale<uint64_t, schar>, convertToScale<uint64_t, ushort>, convertToScale<uint64_t, short>, convertToScale<uint64_t, int>, convertToScale<uint64_t, float>, convertToScale<uint64_t, double>, 0, 0, 0, convertToScale<uint64_t, uint64_t>, convertToScale<uint64_t, int64_t>, convertToScale<uint64_t, uint32_t>},
+        {convertToScale<int64_t, uchar>, convertToScale<int64_t, schar>, convertToScale<int64_t, ushort>, convertToScale<int64_t, short>, convertToScale<int64_t, int>, convertToScale<int64_t, float>, convertToScale<int64_t, double>, 0, 0, 0, convertToScale<int64_t, uint64_t>, convertToScale<int64_t, int64_t>, convertToScale<int64_t, uint32_t>},
+        {convertToScale<uint32_t, uchar>, convertToScale<uint32_t, schar>, convertToScale<uint32_t, ushort>, convertToScale<uint32_t, short>, convertToScale<uint32_t, int>, convertToScale<uint32_t, float>, convertToScale<uint32_t, double>, 0, 0, 0, convertToScale<uint32_t, uint64_t>, convertToScale<uint32_t, int64_t>, convertToScale<uint32_t, uint32_t>},
     };
 
-    funcs[sdepth][ddepth](reshape(1), dst.reshape(1), alpha, beta, stream);
+    func_t func = funcs[sdepth][ddepth];
+    CV_Assert(func);
+
+    func(src.reshape(1), dst.reshape(1), alpha, beta, stream);
 }
 
 #endif

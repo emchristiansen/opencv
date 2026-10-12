@@ -1,90 +1,67 @@
-/*M///////////////////////////////////////////////////////////////////////////////////////
-//
-//  IMPORTANT: READ BEFORE DOWNLOADING, COPYING, INSTALLING OR USING.
-//
-//  By downloading, copying, installing or using the software you agree to this license.
-//  If you do not agree to this license, do not download, install,
-//  copy or use the software.
-//
-//
-//                          License Agreement
-//                For Open Source Computer Vision Library
-//
-// Copyright (C) 2000-2008, Intel Corporation, all rights reserved.
-// Copyright (C) 2009, Willow Garage Inc., all rights reserved.
-// Third party copyrights are property of their respective owners.
-//
-// Redistribution and use in source and binary forms, with or without modification,
-// are permitted provided that the following conditions are met:
-//
-//   * Redistribution's of source code must retain the above copyright notice,
-//     this list of conditions and the following disclaimer.
-//
-//   * Redistribution's in binary form must reproduce the above copyright notice,
-//     this list of conditions and the following disclaimer in the documentation
-//     and/or other materials provided with the distribution.
-//
-//   * The name of the copyright holders may not be used to endorse or promote products
-//     derived from this software without specific prior written permission.
-//
-// This software is provided by the copyright holders and contributors "as is" and
-// any express or implied warranties, including, but not limited to, the implied
-// warranties of merchantability and fitness for a particular purpose are disclaimed.
-// In no event shall the Intel Corporation or contributors be liable for any direct,
-// indirect, incidental, special, exemplary, or consequential damages
-// (including, but not limited to, procurement of substitute goods or services;
-// loss of use, data, or profits; or business interruption) however caused
-// and on any theory of liability, whether in contract, strict liability,
-// or tort (including negligence or otherwise) arising in any way out of
-// the use of this software, even if advised of the possibility of such damage.
-//
-//
-//M*/
 
 #include <iostream>
 #include <fstream>
 #include <string>
 #include "opencv2/opencv_modules.hpp"
 #include <opencv2/core/utility.hpp>
+#include "opencv2/imgcodecs.hpp"
 #include "opencv2/highgui.hpp"
 #include "opencv2/stitching/detail/autocalib.hpp"
 #include "opencv2/stitching/detail/blenders.hpp"
+#include "opencv2/stitching/detail/timelapsers.hpp"
 #include "opencv2/stitching/detail/camera.hpp"
 #include "opencv2/stitching/detail/exposure_compensate.hpp"
 #include "opencv2/stitching/detail/matchers.hpp"
 #include "opencv2/stitching/detail/motion_estimators.hpp"
 #include "opencv2/stitching/detail/seam_finders.hpp"
-#include "opencv2/stitching/detail/util.hpp"
 #include "opencv2/stitching/detail/warpers.hpp"
 #include "opencv2/stitching/warpers.hpp"
+#include "opencv2/features.hpp"
+#include "opencv2/core/ocl.hpp"
+
+#ifdef HAVE_OPENCV_XFEATURES2D
+#include "opencv2/xfeatures2d.hpp"
+#include "opencv2/xfeatures2d/nonfree.hpp"
+#endif
+
+#define ENABLE_LOG 1
+#define LOG(msg) std::cout << msg
+#define LOGLN(msg) std::cout << msg << std::endl
 
 using namespace std;
 using namespace cv;
 using namespace cv::detail;
 
-static void printUsage()
+static void printUsage(char** argv)
 {
     cout <<
         "Rotation model images stitcher.\n\n"
-        "stitching_detailed img1 img2 [...imgN] [flags]\n\n"
+         << argv[0] << " img1 img2 [...imgN] [flags]\n\n"
         "Flags:\n"
         "  --preview\n"
         "      Run stitching in the preview mode. Works faster than usual mode,\n"
         "      but output image will have lower resolution.\n"
-        "  --try_gpu (yes|no)\n"
-        "      Try to use GPU. The default value is 'no'. All default values\n"
+        "  --try_cuda (yes|no)\n"
+        "      Try to use CUDA. The default value is 'no'. All default values\n"
         "      are for CPU mode.\n"
         "\nMotion Estimation Flags:\n"
         "  --work_megapix <float>\n"
         "      Resolution for image registration step. The default is 0.6 Mpx.\n"
-        "  --features (surf|orb)\n"
-        "      Type of features used for images matching. The default is surf.\n"
+        "  --features (surf|orb|sift|akaze|aliked|disk|xfeat)\n"
+        "      Type of features used for images matching.\n"
+        "      The default is surf if available, orb otherwise.\n"
+        "      When using 'aliked' or 'disk', requires --matcher lightglue and DNN model paths.\n"
+        "      When using 'xfeat', requires --xfeat_model and uses the standard matcher.\n"
+        "  --matcher (homography|affine|lightglue)\n"
+        "      Matcher used for pairwise image matching.\n"
+        "  --estimator (homography|affine)\n"
+        "      Type of estimator used for transformation estimation.\n"
         "  --match_conf <float>\n"
         "      Confidence for feature matching step. The default is 0.65 for surf and 0.3 for orb.\n"
         "  --conf_thresh <float>\n"
         "      Threshold for two images are from the same panorama confidence.\n"
         "      The default is 1.0.\n"
-        "  --ba (reproj|ray)\n"
+        "  --ba (no|reproj|ray|affine)\n"
         "      Bundle adjustment cost function. The default is ray.\n"
         "  --ba_refine_mask (mask)\n"
         "      Set refinement mask for bundle adjustment. It looks like 'x_xxx',\n"
@@ -100,7 +77,7 @@ static void printUsage()
         "      Labels description: Nm is number of matches, Ni is number of inliers,\n"
         "      C is confidence.\n"
         "\nCompositing Flags:\n"
-        "  --warp (plane|cylindrical|spherical|fisheye|stereographic|compressedPlaneA2B1|compressedPlaneA1.5B1|compressedPlanePortraitA2B1|compressedPlanePortraitA1.5B1|paniniA2B1|paniniA1.5B1|paniniPortraitA2B1|paniniPortraitA1.5B1|mercator|transverseMercator)\n"
+        "  --warp (affine|plane|cylindrical|spherical|fisheye|stereographic|compressedPlaneA2B1|compressedPlaneA1.5B1|compressedPlanePortraitA2B1|compressedPlanePortraitA1.5B1|paniniA2B1|paniniA1.5B1|paniniPortraitA2B1|paniniPortraitA1.5B1|mercator|transverseMercator)\n"
         "      Warp surface type. The default is 'spherical'.\n"
         "  --seam_megapix <float>\n"
         "      Resolution for seam estimation step. The default is 0.1 Mpx.\n"
@@ -109,26 +86,59 @@ static void printUsage()
         "  --compose_megapix <float>\n"
         "      Resolution for compositing step. Use -1 for original resolution.\n"
         "      The default is -1.\n"
-        "  --expos_comp (no|gain|gain_blocks)\n"
+        "  --expos_comp (no|gain|gain_blocks|channels|channels_blocks)\n"
         "      Exposure compensation method. The default is 'gain_blocks'.\n"
+        "  --expos_comp_nr_feeds <int>\n"
+        "      Number of exposure compensation feed. The default is 1.\n"
+        "  --expos_comp_nr_filtering <int>\n"
+        "      Number of filtering iterations of the exposure compensation gains.\n"
+        "      Only used when using a block exposure compensation method.\n"
+        "      The default is 2.\n"
+        "  --expos_comp_block_size <int>\n"
+        "      BLock size in pixels used by the exposure compensator.\n"
+        "      Only used when using a block exposure compensation method.\n"
+        "      The default is 32.\n"
         "  --blend (no|feather|multiband)\n"
         "      Blending method. The default is 'multiband'.\n"
         "  --blend_strength <float>\n"
         "      Blending strength from [0,100] range. The default is 5.\n"
         "  --output <result_img>\n"
-        "      The default is 'result.jpg'.\n";
+        "      The default is 'result.jpg'.\n"
+        "  --timelapse (as_is|crop) \n"
+        "      Output warped images separately as frames of a time lapse movie, with 'fixed_' prepended to input file names.\n"
+        "  --rangewidth <int>\n"
+        "      uses range_width to limit number of images to match with.\n"
+        "\nDNN Feature Options:\n"
+        "  --aliked_model <path>\n"
+        "      Path to ALIKED ONNX model file. Required with --features aliked.\n"
+        "  --disk_model <path>\n"
+        "      Path to DISK ONNX model file. Required with --features disk.\n"
+        "  --lightglue_model <path>\n"
+        "      Path to LightGlue ONNX model file for the selected feature type.\n"
+        "  --lg_score_thresh <float>\n"
+        "      LightGlue confidence threshold. The default is 0.0 (accept all).\n"
+        "  --xfeat_model <path>\n"
+        "      Path to XFeat ONNX model file.\n";
 }
 
 
 // Default command line args
 vector<String> img_names;
 bool preview = false;
-bool try_gpu = false;
+bool try_cuda = false;
 double work_megapix = 0.6;
 double seam_megapix = 0.1;
 double compose_megapix = -1;
 float conf_thresh = 1.f;
+#ifdef HAVE_OPENCV_XFEATURES2D
 string features_type = "surf";
+float match_conf = 0.65f;
+#else
+string features_type = "orb";
+float match_conf = 0.3f;
+#endif
+string matcher_type = "homography";
+string estimator_type = "homography";
 string ba_cost_func = "ray";
 string ba_refine_mask = "xxxxx";
 bool do_wave_correct = true;
@@ -137,39 +147,50 @@ bool save_graph = false;
 std::string save_graph_to;
 string warp_type = "spherical";
 int expos_comp_type = ExposureCompensator::GAIN_BLOCKS;
-float match_conf = 0.3f;
+int expos_comp_nr_feeds = 1;
+int expos_comp_nr_filtering = 2;
+int expos_comp_block_size = 32;
 string seam_find_type = "gc_color";
 int blend_type = Blender::MULTI_BAND;
+int timelapse_type = Timelapser::AS_IS;
 float blend_strength = 5;
 string result_name = "result.jpg";
+bool timelapse = false;
+int range_width = -1;
+String aliked_model_path;
+String disk_model_path;
+String lightglue_model_path;
+String xfeat_model_path;
+float lg_score_thresh = 0.0f;
+
 
 static int parseCmdArgs(int argc, char** argv)
 {
     if (argc == 1)
     {
-        printUsage();
+        printUsage(argv);
         return -1;
     }
     for (int i = 1; i < argc; ++i)
     {
         if (string(argv[i]) == "--help" || string(argv[i]) == "/?")
         {
-            printUsage();
+            printUsage(argv);
             return -1;
         }
         else if (string(argv[i]) == "--preview")
         {
             preview = true;
         }
-        else if (string(argv[i]) == "--try_gpu")
+        else if (string(argv[i]) == "--try_cuda")
         {
             if (string(argv[i + 1]) == "no")
-                try_gpu = false;
+                try_cuda = false;
             else if (string(argv[i + 1]) == "yes")
-                try_gpu = true;
+                try_cuda = true;
             else
             {
-                cout << "Bad --try_gpu flag value\n";
+                cout << "Bad --try_cuda flag value\n";
                 return -1;
             }
             i++;
@@ -197,8 +218,30 @@ static int parseCmdArgs(int argc, char** argv)
         else if (string(argv[i]) == "--features")
         {
             features_type = argv[i + 1];
-            if (features_type == "orb")
+            if (string(features_type) == "orb")
                 match_conf = 0.3f;
+            i++;
+        }
+        else if (string(argv[i]) == "--matcher")
+        {
+            if (string(argv[i + 1]) == "homography" || string(argv[i + 1]) == "affine" || string(argv[i + 1]) == "lightglue")
+                matcher_type = argv[i + 1];
+            else
+            {
+                cout << "Bad --matcher flag value\n";
+                return -1;
+            }
+            i++;
+        }
+        else if (string(argv[i]) == "--estimator")
+        {
+            if (string(argv[i + 1]) == "homography" || string(argv[i + 1]) == "affine")
+                estimator_type = argv[i + 1];
+            else
+            {
+                cout << "Bad --estimator flag value\n";
+                return -1;
+            }
             i++;
         }
         else if (string(argv[i]) == "--match_conf")
@@ -266,11 +309,30 @@ static int parseCmdArgs(int argc, char** argv)
                 expos_comp_type = ExposureCompensator::GAIN;
             else if (string(argv[i + 1]) == "gain_blocks")
                 expos_comp_type = ExposureCompensator::GAIN_BLOCKS;
+            else if (string(argv[i + 1]) == "channels")
+                expos_comp_type = ExposureCompensator::CHANNELS;
+            else if (string(argv[i + 1]) == "channels_blocks")
+                expos_comp_type = ExposureCompensator::CHANNELS_BLOCKS;
             else
             {
                 cout << "Bad exposure compensation method\n";
                 return -1;
             }
+            i++;
+        }
+        else if (string(argv[i]) == "--expos_comp_nr_feeds")
+        {
+            expos_comp_nr_feeds = atoi(argv[i + 1]);
+            i++;
+        }
+        else if (string(argv[i]) == "--expos_comp_nr_filtering")
+        {
+            expos_comp_nr_filtering = atoi(argv[i + 1]);
+            i++;
+        }
+        else if (string(argv[i]) == "--expos_comp_block_size")
+        {
+            expos_comp_block_size = atoi(argv[i + 1]);
             i++;
         }
         else if (string(argv[i]) == "--seam")
@@ -304,6 +366,26 @@ static int parseCmdArgs(int argc, char** argv)
             }
             i++;
         }
+        else if (string(argv[i]) == "--timelapse")
+        {
+            timelapse = true;
+
+            if (string(argv[i + 1]) == "as_is")
+                timelapse_type = Timelapser::AS_IS;
+            else if (string(argv[i + 1]) == "crop")
+                timelapse_type = Timelapser::CROP;
+            else
+            {
+                cout << "Bad timelapse method\n";
+                return -1;
+            }
+            i++;
+        }
+        else if (string(argv[i]) == "--rangewidth")
+        {
+            range_width = atoi(argv[i + 1]);
+            i++;
+        }
         else if (string(argv[i]) == "--blend_strength")
         {
             blend_strength = static_cast<float>(atof(argv[i + 1]));
@@ -314,6 +396,31 @@ static int parseCmdArgs(int argc, char** argv)
             result_name = argv[i + 1];
             i++;
         }
+        else if (string(argv[i]) == "--aliked_model")
+        {
+            aliked_model_path = argv[i + 1];
+            i++;
+        }
+        else if (string(argv[i]) == "--disk_model")
+        {
+            disk_model_path = argv[i + 1];
+            i++;
+        }
+        else if (string(argv[i]) == "--lightglue_model")
+        {
+            lightglue_model_path = argv[i + 1];
+            i++;
+        }
+        else if (string(argv[i]) == "--xfeat_model")
+        {
+            xfeat_model_path = argv[i + 1];
+            i++;
+        }
+        else if (string(argv[i]) == "--lg_score_thresh")
+        {
+            lg_score_thresh = static_cast<float>(atof(argv[i + 1]));
+            i++;
+        }
         else
             img_names.push_back(argv[i]);
     }
@@ -321,6 +428,40 @@ static int parseCmdArgs(int argc, char** argv)
     {
         compose_megapix = 0.6;
     }
+
+    // Validate DNN options
+    bool is_dnn_feature = features_type == "aliked" || features_type == "disk";
+    if (is_dnn_feature && matcher_type != "lightglue")
+    {
+        cout << "Error: --features " << features_type << " requires --matcher lightglue\n";
+        return -1;
+    }
+    if (is_dnn_feature && lightglue_model_path.empty())
+    {
+        cout << "Error: --features " << features_type << " requires --lightglue_model\n";
+        return -1;
+    }
+    if (features_type == "aliked" && aliked_model_path.empty())
+    {
+        cout << "Error: --features aliked requires --aliked_model\n";
+        return -1;
+    }
+    if (features_type == "disk" && disk_model_path.empty())
+    {
+        cout << "Error: --features disk requires --disk_model\n";
+        return -1;
+    }
+    if (features_type == "xfeat" && xfeat_model_path.empty())
+    {
+        cout << "Error: --features xfeat requires --xfeat_model\n";
+        return -1;
+    }
+    if (features_type == "xfeat" && matcher_type == "lightglue")
+    {
+        cout << "Error: --features xfeat does not support --matcher lightglue; use homography or affine\n";
+        return -1;
+    }
+
     return 0;
 }
 
@@ -331,11 +472,23 @@ int main(int argc, char* argv[])
     int64 app_start_time = getTickCount();
 #endif
 
+#if 0
     cv::setBreakOnError(true);
+#endif
 
     int retval = parseCmdArgs(argc, argv);
     if (retval)
         return retval;
+
+    bool use_aliked = (features_type == "aliked");
+    bool use_disk = (features_type == "disk");
+    bool use_xfeat = (features_type == "xfeat");
+    // LightGlue-compatible DNN features
+    bool use_dnn_feature = use_aliked || use_disk;
+
+    // Disable OpenCL for DNN-based features to avoid backend sync issues
+    if (use_dnn_feature || use_xfeat)
+        cv::ocl::setUseOpenCL(false);
 
     // Check if have enough images
     int num_images = static_cast<int>(img_names.size());
@@ -353,19 +506,54 @@ int main(int argc, char* argv[])
     int64 t = getTickCount();
 #endif
 
-    Ptr<FeaturesFinder> finder;
-    if (features_type == "surf")
+    Ptr<Feature2D> finder;
+    if (features_type == "aliked")
     {
-#ifdef HAVE_OPENCV_NONFREE
-        if (try_gpu && cuda::getCudaEnabledDeviceCount() > 0)
-            finder = makePtr<SurfFeaturesFinderGpu>();
-        else
+        finder = ALIKED::create(aliked_model_path);
+    }
+    else if (features_type == "disk")
+    {
+#ifdef HAVE_OPENCV_DNN
+        finder = DISK::create(disk_model_path, 1024);
+#else
+        cout << "OpenCV is built without opencv_dnn module. DISK algorithm is not available!" << std::endl;
+        return -1;
 #endif
-            finder = makePtr<SurfFeaturesFinder>();
     }
     else if (features_type == "orb")
     {
-        finder = makePtr<OrbFeaturesFinder>();
+        finder = ORB::create();
+    }
+    else if (features_type == "akaze")
+    {
+#ifdef HAVE_OPENCV_XFEATURES2D
+        finder = xfeatures2d::AKAZE::create();
+#else
+        cout << "OpenCV is built without opencv_contrib modules. AKAZE algorithm is not available!" << std::endl;
+        return -1;
+#endif
+    }
+    else if (features_type == "surf")
+    {
+#if defined(HAVE_OPENCV_XFEATURES2D) && defined(HAVE_OPENCV_NONFREE)
+        finder = xfeatures2d::SURF::create();
+#else
+        cout << "OpenCV is built without NONFREE modules. SURF algorithm is not available!" << std::endl;
+        return -1;
+#endif
+    }
+    else if (features_type == "sift")
+    {
+        finder = SIFT::create();
+    }
+    else if (features_type == "xfeat")
+    {
+#ifdef HAVE_OPENCV_DNN
+        finder = XFeat::create(xfeat_model_path, 4096, 0.05f, Size(640, 640));
+#else
+        cout << "OpenCV is built without opencv_dnn module. XFeat algorithm is not available!" << std::endl;
+        return -1;
+#endif
     }
     else
     {
@@ -381,7 +569,7 @@ int main(int argc, char* argv[])
 
     for (int i = 0; i < num_images; ++i)
     {
-        full_img = imread(img_names[i]);
+        full_img = imread(samples::findFile(img_names[i]));
         full_img_sizes[i] = full_img.size();
 
         if (full_img.empty())
@@ -402,7 +590,7 @@ int main(int argc, char* argv[])
                 work_scale = min(1.0, sqrt(work_megapix * 1e6 / full_img.size().area()));
                 is_work_scale_set = true;
             }
-            resize(full_img, img, Size(), work_scale, work_scale);
+            resize(full_img, img, Size(), work_scale, work_scale, INTER_LINEAR_EXACT);
         }
         if (!is_seam_scale_set)
         {
@@ -411,15 +599,14 @@ int main(int argc, char* argv[])
             is_seam_scale_set = true;
         }
 
-        (*finder)(img, features[i]);
+        computeImageFeatures(finder, img, features[i]);
         features[i].img_idx = i;
         LOGLN("Features in image #" << i+1 << ": " << features[i].keypoints.size());
 
-        resize(full_img, img, Size(), seam_scale, seam_scale);
+        resize(full_img, img, Size(), seam_scale, seam_scale, INTER_LINEAR_EXACT);
         images[i] = img.clone();
     }
 
-    finder->collectGarbage();
     full_img.release();
     img.release();
 
@@ -430,9 +617,28 @@ int main(int argc, char* argv[])
     t = getTickCount();
 #endif
     vector<MatchesInfo> pairwise_matches;
-    BestOf2NearestMatcher matcher(try_gpu, match_conf);
-    matcher(features, pairwise_matches);
-    matcher.collectGarbage();
+    Ptr<FeaturesMatcher> matcher;
+    if (use_dnn_feature && matcher_type == "lightglue")
+    {
+        Ptr<LightGlueMatcher> lg;
+        if (use_disk)
+            lg = LightGlueMatcher::create(lightglue_model_path, 0.0f, 0, 0, LG_DISK);
+        else
+            lg = LightGlueMatcher::create(lightglue_model_path);
+        Ptr<LightGlueFeaturesMatcher> lgMatcher = makePtr<LightGlueFeaturesMatcher>(lg);
+        lgMatcher->setScoreThreshold(lg_score_thresh);
+        matcher = lgMatcher;
+    }
+    else if (matcher_type == "affine")
+        matcher = makePtr<AffineBestOf2NearestMatcher>(false, try_cuda, match_conf);
+    else if (range_width==-1)
+        matcher = makePtr<BestOf2NearestMatcher>(try_cuda, match_conf);
+    else
+        matcher = makePtr<BestOf2NearestRangeMatcher>(range_width, try_cuda, match_conf);
+
+    (*matcher)(features, pairwise_matches);
+    matcher->collectGarbage();
+
     LOGLN("Pairwise matching, time: " << ((getTickCount() - t) / getTickFrequency()) << " sec");
 
     // Check if we should save matches graph
@@ -467,9 +673,14 @@ int main(int argc, char* argv[])
         return -1;
     }
 
-    HomographyBasedEstimator estimator;
+    Ptr<Estimator> estimator;
+    if (estimator_type == "affine")
+        estimator = makePtr<AffineBasedEstimator>();
+    else
+        estimator = makePtr<HomographyBasedEstimator>();
+
     vector<CameraParams> cameras;
-    if (!estimator(features, pairwise_matches, cameras))
+    if (!(*estimator)(features, pairwise_matches, cameras))
     {
         cout << "Homography estimation failed.\n";
         return -1;
@@ -480,12 +691,14 @@ int main(int argc, char* argv[])
         Mat R;
         cameras[i].R.convertTo(R, CV_32F);
         cameras[i].R = R;
-        LOGLN("Initial intrinsics #" << indices[i]+1 << ":\n" << cameras[i].K());
+        LOGLN("Initial camera intrinsics #" << indices[i]+1 << ":\nK:\n" << cameras[i].K() << "\nR:\n" << cameras[i].R);
     }
 
     Ptr<detail::BundleAdjusterBase> adjuster;
     if (ba_cost_func == "reproj") adjuster = makePtr<detail::BundleAdjusterReproj>();
     else if (ba_cost_func == "ray") adjuster = makePtr<detail::BundleAdjusterRay>();
+    else if (ba_cost_func == "affine") adjuster = makePtr<detail::BundleAdjusterAffinePartial>();
+    else if (ba_cost_func == "no") adjuster = makePtr<NoBundleAdjuster>();
     else
     {
         cout << "Unknown bundle adjustment cost function: '" << ba_cost_func << "'.\n";
@@ -510,7 +723,7 @@ int main(int argc, char* argv[])
     vector<double> focals;
     for (size_t i = 0; i < cameras.size(); ++i)
     {
-        LOGLN("Camera #" << indices[i]+1 << ":\n" << cameras[i].K());
+        LOGLN("Camera #" << indices[i]+1 << ":\nK:\n" << cameras[i].K() << "\nR:\n" << cameras[i].R);
         focals.push_back(cameras[i].focal);
     }
 
@@ -525,7 +738,7 @@ int main(int argc, char* argv[])
     {
         vector<Mat> rmats;
         for (size_t i = 0; i < cameras.size(); ++i)
-            rmats.push_back(cameras[i].R);
+            rmats.push_back(cameras[i].R.clone());
         waveCorrect(rmats, wave_correct);
         for (size_t i = 0; i < cameras.size(); ++i)
             cameras[i].R = rmats[i];
@@ -537,12 +750,12 @@ int main(int argc, char* argv[])
 #endif
 
     vector<Point> corners(num_images);
-    vector<Mat> masks_warped(num_images);
-    vector<Mat> images_warped(num_images);
+    vector<UMat> masks_warped(num_images);
+    vector<UMat> images_warped(num_images);
     vector<Size> sizes(num_images);
-    vector<Mat> masks(num_images);
+    vector<UMat> masks(num_images);
 
-    // Preapre images masks
+    // Prepare images masks
     for (int i = 0; i < num_images; ++i)
     {
         masks[i].create(images[i].size(), CV_8U);
@@ -553,7 +766,7 @@ int main(int argc, char* argv[])
 
     Ptr<WarperCreator> warper_creator;
 #ifdef HAVE_OPENCV_CUDAWARPING
-    if (try_gpu && cuda::getCudaEnabledDeviceCount() > 0)
+    if (try_cuda && cuda::getCudaEnabledDeviceCount() > 0)
     {
         if (warp_type == "plane")
             warper_creator = makePtr<cv::PlaneWarperGpu>();
@@ -567,6 +780,8 @@ int main(int argc, char* argv[])
     {
         if (warp_type == "plane")
             warper_creator = makePtr<cv::PlaneWarper>();
+        else if (warp_type == "affine")
+            warper_creator = makePtr<cv::AffineWarper>();
         else if (warp_type == "cylindrical")
             warper_creator = makePtr<cv::CylindricalWarper>();
         else if (warp_type == "spherical")
@@ -619,14 +834,46 @@ int main(int argc, char* argv[])
         warper->warp(masks[i], K, cameras[i].R, INTER_NEAREST, BORDER_CONSTANT, masks_warped[i]);
     }
 
-    vector<Mat> images_warped_f(num_images);
+    vector<UMat> images_warped_f(num_images);
     for (int i = 0; i < num_images; ++i)
         images_warped[i].convertTo(images_warped_f[i], CV_32F);
 
     LOGLN("Warping images, time: " << ((getTickCount() - t) / getTickFrequency()) << " sec");
 
+    LOGLN("Compensating exposure...");
+#if ENABLE_LOG
+    t = getTickCount();
+#endif
+
     Ptr<ExposureCompensator> compensator = ExposureCompensator::createDefault(expos_comp_type);
+    if (dynamic_cast<GainCompensator*>(compensator.get()))
+    {
+        GainCompensator* gcompensator = dynamic_cast<GainCompensator*>(compensator.get());
+        gcompensator->setNrFeeds(expos_comp_nr_feeds);
+    }
+
+    if (dynamic_cast<ChannelsCompensator*>(compensator.get()))
+    {
+        ChannelsCompensator* ccompensator = dynamic_cast<ChannelsCompensator*>(compensator.get());
+        ccompensator->setNrFeeds(expos_comp_nr_feeds);
+    }
+
+    if (dynamic_cast<BlocksCompensator*>(compensator.get()))
+    {
+        BlocksCompensator* bcompensator = dynamic_cast<BlocksCompensator*>(compensator.get());
+        bcompensator->setNrFeeds(expos_comp_nr_feeds);
+        bcompensator->setNrGainsFilteringIterations(expos_comp_nr_filtering);
+        bcompensator->setBlockSize(expos_comp_block_size, expos_comp_block_size);
+    }
+
     compensator->feed(corners, images_warped, masks_warped);
+
+    LOGLN("Compensating exposure, time: " << ((getTickCount() - t) / getTickFrequency()) << " sec");
+
+    LOGLN("Finding seams...");
+#if ENABLE_LOG
+    t = getTickCount();
+#endif
 
     Ptr<SeamFinder> seam_finder;
     if (seam_find_type == "no")
@@ -635,8 +882,8 @@ int main(int argc, char* argv[])
         seam_finder = makePtr<detail::VoronoiSeamFinder>();
     else if (seam_find_type == "gc_color")
     {
-#ifdef HAVE_OPENCV_CUDA
-        if (try_gpu && cuda::getCudaEnabledDeviceCount() > 0)
+#ifdef HAVE_OPENCV_CUDALEGACY
+        if (try_cuda && cuda::getCudaEnabledDeviceCount() > 0)
             seam_finder = makePtr<detail::GraphCutSeamFinderGpu>(GraphCutSeamFinderBase::COST_COLOR);
         else
 #endif
@@ -644,8 +891,8 @@ int main(int argc, char* argv[])
     }
     else if (seam_find_type == "gc_colorgrad")
     {
-#ifdef HAVE_OPENCV_CUDA
-        if (try_gpu && cuda::getCudaEnabledDeviceCount() > 0)
+#ifdef HAVE_OPENCV_CUDALEGACY
+        if (try_cuda && cuda::getCudaEnabledDeviceCount() > 0)
             seam_finder = makePtr<detail::GraphCutSeamFinderGpu>(GraphCutSeamFinderBase::COST_COLOR_GRAD);
         else
 #endif
@@ -663,6 +910,8 @@ int main(int argc, char* argv[])
 
     seam_finder->find(images_warped_f, corners, masks_warped);
 
+    LOGLN("Finding seams, time: " << ((getTickCount() - t) / getTickFrequency()) << " sec");
+
     // Release unused memory
     images.clear();
     images_warped.clear();
@@ -677,6 +926,7 @@ int main(int argc, char* argv[])
     Mat img_warped, img_warped_s;
     Mat dilated_mask, seam_mask, mask, mask_warped;
     Ptr<Blender> blender;
+    Ptr<Timelapser> timelapser;
     //double compose_seam_aspect = 1;
     double compose_work_aspect = 1;
 
@@ -685,7 +935,7 @@ int main(int argc, char* argv[])
         LOGLN("Compositing image #" << indices[img_idx]+1);
 
         // Read image and resize it if necessary
-        full_img = imread(img_names[img_idx]);
+        full_img = imread(samples::findFile(img_names[img_idx]));
         if (!is_compose_scale_set)
         {
             if (compose_megapix > 0)
@@ -724,7 +974,7 @@ int main(int argc, char* argv[])
             }
         }
         if (abs(compose_scale - 1) > 1e-1)
-            resize(full_img, img, Size(), compose_scale, compose_scale);
+            resize(full_img, img, Size(), compose_scale, compose_scale, INTER_LINEAR_EXACT);
         else
             img = full_img;
         full_img.release();
@@ -750,16 +1000,16 @@ int main(int argc, char* argv[])
         mask.release();
 
         dilate(masks_warped[img_idx], dilated_mask, Mat());
-        resize(dilated_mask, seam_mask, mask_warped.size());
+        resize(dilated_mask, seam_mask, mask_warped.size(), 0, 0, INTER_LINEAR_EXACT);
         mask_warped = seam_mask & mask_warped;
 
-        if (!blender)
+        if (!blender && !timelapse)
         {
-            blender = Blender::createDefault(blend_type, try_gpu);
+            blender = Blender::createDefault(blend_type, try_cuda);
             Size dst_sz = resultRoi(corners, sizes).size();
             float blend_width = sqrt(static_cast<float>(dst_sz.area())) * blend_strength / 100.f;
             if (blend_width < 1.f)
-                blender = Blender::createDefault(Blender::NO, try_gpu);
+                blender = Blender::createDefault(Blender::NO, try_cuda);
             else if (blend_type == Blender::MULTI_BAND)
             {
                 MultiBandBlender* mb = dynamic_cast<MultiBandBlender*>(blender.get());
@@ -774,17 +1024,43 @@ int main(int argc, char* argv[])
             }
             blender->prepare(corners, sizes);
         }
+        else if (!timelapser && timelapse)
+        {
+            timelapser = Timelapser::createDefault(timelapse_type);
+            timelapser->initialize(corners, sizes);
+        }
 
         // Blend the current image
-        blender->feed(img_warped_s, mask_warped, corners[img_idx]);
+        if (timelapse)
+        {
+            timelapser->process(img_warped_s, Mat::ones(img_warped_s.size(), CV_8UC1), corners[img_idx]);
+            String fixedFileName;
+            size_t pos_s = String(img_names[img_idx]).find_last_of("/\\");
+            if (pos_s == String::npos)
+            {
+                fixedFileName = "fixed_" + img_names[img_idx];
+            }
+            else
+            {
+                fixedFileName = "fixed_" + String(img_names[img_idx]).substr(pos_s + 1, String(img_names[img_idx]).length() - pos_s);
+            }
+            imwrite(fixedFileName, timelapser->getDst());
+        }
+        else
+        {
+            blender->feed(img_warped_s, mask_warped, corners[img_idx]);
+        }
     }
 
-    Mat result, result_mask;
-    blender->blend(result, result_mask);
+    if (!timelapse)
+    {
+        Mat result, result_mask;
+        blender->blend(result, result_mask);
 
-    LOGLN("Compositing, time: " << ((getTickCount() - t) / getTickFrequency()) << " sec");
+        LOGLN("Compositing, time: " << ((getTickCount() - t) / getTickFrequency()) << " sec");
 
-    imwrite(result_name, result);
+        imwrite(result_name, result);
+    }
 
     LOGLN("Finished, total time: " << ((getTickCount() - app_start_time) / getTickFrequency()) << " sec");
     return 0;

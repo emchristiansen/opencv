@@ -41,39 +41,48 @@
 //
 //M*/
 
-#ifndef __OPENCV_CORE_CUDAINL_HPP__
-#define __OPENCV_CORE_CUDAINL_HPP__
+#ifndef OPENCV_CORE_CUDAINL_HPP
+#define OPENCV_CORE_CUDAINL_HPP
 
 #include "opencv2/core/cuda.hpp"
 
+//! @cond IGNORED
+
 namespace cv { namespace cuda {
 
-//////////////////////////////// GpuMat ///////////////////////////////
+//===================================================================================
+// GpuMat
+//===================================================================================
 
 inline
-GpuMat::GpuMat()
-    : flags(0), rows(0), cols(0), step(0), data(0), refcount(0), datastart(0), dataend(0)
+GpuMat::GpuMat(Allocator* allocator_)
+    : flags(0), rows(0), cols(0), step(0), data(0), refcount(0), datastart(0), dataend(0), allocator(allocator_)
 {}
 
 inline
-GpuMat::GpuMat(int rows_, int cols_, int type_)
-    : flags(0), rows(0), cols(0), step(0), data(0), refcount(0), datastart(0), dataend(0)
+GpuMat::GpuMat(int rows_, int cols_, int type_, Allocator* allocator_)
+    : flags(0), rows(0), cols(0), step(0), data(0), refcount(0), datastart(0), dataend(0), allocator(allocator_)
 {
     if (rows_ > 0 && cols_ > 0)
         create(rows_, cols_, type_);
 }
 
 inline
-GpuMat::GpuMat(Size size_, int type_)
-    : flags(0), rows(0), cols(0), step(0), data(0), refcount(0), datastart(0), dataend(0)
+GpuMat::GpuMat(Size size_, int type_, Allocator* allocator_)
+    : flags(0), rows(0), cols(0), step(0), data(0), refcount(0), datastart(0), dataend(0), allocator(allocator_)
 {
     if (size_.height > 0 && size_.width > 0)
         create(size_.height, size_.width, type_);
 }
 
+// WARNING: unreachable code using Ninja
+#if defined _MSC_VER && _MSC_VER >= 1920
+#pragma warning(push)
+#pragma warning(disable: 4702)
+#endif
 inline
-GpuMat::GpuMat(int rows_, int cols_, int type_, Scalar s_)
-    : flags(0), rows(0), cols(0), step(0), data(0), refcount(0), datastart(0), dataend(0)
+GpuMat::GpuMat(int rows_, int cols_, int type_, Scalar s_, Allocator* allocator_)
+    : flags(0), rows(0), cols(0), step(0), data(0), refcount(0), datastart(0), dataend(0), allocator(allocator_)
 {
     if (rows_ > 0 && cols_ > 0)
     {
@@ -83,8 +92,8 @@ GpuMat::GpuMat(int rows_, int cols_, int type_, Scalar s_)
 }
 
 inline
-GpuMat::GpuMat(Size size_, int type_, Scalar s_)
-    : flags(0), rows(0), cols(0), step(0), data(0), refcount(0), datastart(0), dataend(0)
+GpuMat::GpuMat(Size size_, int type_, Scalar s_, Allocator* allocator_)
+    : flags(0), rows(0), cols(0), step(0), data(0), refcount(0), datastart(0), dataend(0), allocator(allocator_)
 {
     if (size_.height > 0 && size_.width > 0)
     {
@@ -92,18 +101,21 @@ GpuMat::GpuMat(Size size_, int type_, Scalar s_)
         setTo(s_);
     }
 }
+#if defined _MSC_VER && _MSC_VER >= 1920
+#pragma warning(pop)
+#endif
 
 inline
 GpuMat::GpuMat(const GpuMat& m)
-    : flags(m.flags), rows(m.rows), cols(m.cols), step(m.step), data(m.data), refcount(m.refcount), datastart(m.datastart), dataend(m.dataend)
+    : flags(m.flags), rows(m.rows), cols(m.cols), step(m.step), data(m.data), refcount(m.refcount), datastart(m.datastart), dataend(m.dataend), allocator(m.allocator)
 {
     if (refcount)
         CV_XADD(refcount, 1);
 }
 
 inline
-GpuMat::GpuMat(InputArray arr) :
-    flags(0), rows(0), cols(0), step(0), data(0), refcount(0), datastart(0), dataend(0)
+GpuMat::GpuMat(InputArray arr, Allocator* allocator_) :
+    flags(0), rows(0), cols(0), step(0), data(0), refcount(0), datastart(0), dataend(0), allocator(allocator_)
 {
     upload(arr);
 }
@@ -143,6 +155,7 @@ void GpuMat::swap(GpuMat& b)
     std::swap(datastart, b.datastart);
     std::swap(dataend, b.dataend);
     std::swap(refcount, b.refcount);
+    std::swap(allocator, b.allocator);
 }
 
 inline
@@ -153,11 +166,19 @@ GpuMat GpuMat::clone() const
     return m;
 }
 
+// WARNING: unreachable code using Ninja
+#if defined _MSC_VER && _MSC_VER >= 1920
+#pragma warning(push)
+#pragma warning(disable: 4702)
+#endif
 inline
 void GpuMat::copyTo(OutputArray dst, InputArray mask) const
 {
     copyTo(dst, mask, Stream::Null());
 }
+#if defined _MSC_VER && _MSC_VER >= 1920
+#pragma warning(pop)
+#endif
 
 inline
 GpuMat& GpuMat::setTo(Scalar s)
@@ -171,6 +192,11 @@ GpuMat& GpuMat::setTo(Scalar s, InputArray mask)
     return setTo(s, mask, Stream::Null());
 }
 
+// WARNING: unreachable code using Ninja
+#if defined _MSC_VER && _MSC_VER >= 1920
+#pragma warning(push)
+#pragma warning(disable: 4702)
+#endif
 inline
 void GpuMat::convertTo(OutputArray dst, int rtype) const
 {
@@ -182,6 +208,9 @@ void GpuMat::convertTo(OutputArray dst, int rtype, double alpha, double beta) co
 {
     convertTo(dst, rtype, alpha, beta, Stream::Null());
 }
+#if defined _MSC_VER && _MSC_VER >= 1920
+#pragma warning(pop)
+#endif
 
 inline
 void GpuMat::convertTo(OutputArray dst, int rtype, double alpha, Stream& stream) const
@@ -338,7 +367,13 @@ bool GpuMat::empty() const
     return data == 0;
 }
 
-static inline
+inline
+void* GpuMat::cudaPtr() const
+{
+    return data;
+}
+
+inline
 GpuMat createContinuous(int rows, int cols, int type)
 {
     GpuMat m;
@@ -346,13 +381,13 @@ GpuMat createContinuous(int rows, int cols, int type)
     return m;
 }
 
-static inline
+inline
 void createContinuous(Size size, int type, OutputArray arr)
 {
     createContinuous(size.height, size.width, type, arr);
 }
 
-static inline
+inline
 GpuMat createContinuous(Size size, int type)
 {
     GpuMat m;
@@ -360,28 +395,116 @@ GpuMat createContinuous(Size size, int type)
     return m;
 }
 
-static inline
+inline
 void ensureSizeIsEnough(Size size, int type, OutputArray arr)
 {
     ensureSizeIsEnough(size.height, size.width, type, arr);
 }
 
-static inline
+inline
 void swap(GpuMat& a, GpuMat& b)
 {
     a.swap(b);
 }
 
-//////////////////////////////// CudaMem ////////////////////////////////
+//===================================================================================
+// GpuMatND
+//===================================================================================
 
 inline
-CudaMem::CudaMem(AllocType alloc_type_)
+GpuMatND::GpuMatND() :
+    flags(0), dims(0), data(nullptr), offset(0)
+{
+}
+
+inline
+GpuMatND::GpuMatND(const MatShape& _shape, int _type) :
+    flags(0), dims(0), data(nullptr), offset(0)
+{
+    create(_shape, _type);
+}
+
+inline
+void GpuMatND::swap(GpuMatND& m) noexcept
+{
+    std::swap(*this, m);
+}
+
+inline
+bool GpuMatND::isContinuous() const
+{
+    return (flags & Mat::CONTINUOUS_FLAG) != 0;
+}
+
+inline
+bool GpuMatND::isSubmatrix() const
+{
+    return (flags & Mat::SUBMATRIX_FLAG) != 0;
+}
+
+inline
+size_t GpuMatND::elemSize() const
+{
+    return CV_ELEM_SIZE(flags);
+}
+
+inline
+size_t GpuMatND::elemSize1() const
+{
+    return CV_ELEM_SIZE1(flags);
+}
+
+inline
+bool GpuMatND::empty() const
+{
+    return data == nullptr;
+}
+
+inline
+bool GpuMatND::external() const
+{
+    return !empty() && data_.use_count() == 0;
+}
+
+inline
+uchar* GpuMatND::getDevicePtr() const
+{
+    return data + offset;
+}
+
+inline
+size_t GpuMatND::total() const
+{
+    size_t p = 1;
+    for(auto s : size)
+        p *= s;
+    return p;
+}
+
+inline
+size_t GpuMatND::totalMemSize() const
+{
+    return size[0] * step[0];
+}
+
+inline
+int GpuMatND::type() const
+{
+    return CV_MAT_TYPE(flags);
+}
+
+//===================================================================================
+// HostMem
+//===================================================================================
+
+inline
+HostMem::HostMem(AllocType alloc_type_)
     : flags(0), rows(0), cols(0), step(0), data(0), refcount(0), datastart(0), dataend(0), alloc_type(alloc_type_)
 {
 }
 
 inline
-CudaMem::CudaMem(const CudaMem& m)
+HostMem::HostMem(const HostMem& m)
     : flags(m.flags), rows(m.rows), cols(m.cols), step(m.step), data(m.data), refcount(m.refcount), datastart(m.datastart), dataend(m.dataend), alloc_type(m.alloc_type)
 {
     if( refcount )
@@ -389,7 +512,7 @@ CudaMem::CudaMem(const CudaMem& m)
 }
 
 inline
-CudaMem::CudaMem(int rows_, int cols_, int type_, AllocType alloc_type_)
+HostMem::HostMem(int rows_, int cols_, int type_, AllocType alloc_type_)
     : flags(0), rows(0), cols(0), step(0), data(0), refcount(0), datastart(0), dataend(0), alloc_type(alloc_type_)
 {
     if (rows_ > 0 && cols_ > 0)
@@ -397,7 +520,7 @@ CudaMem::CudaMem(int rows_, int cols_, int type_, AllocType alloc_type_)
 }
 
 inline
-CudaMem::CudaMem(Size size_, int type_, AllocType alloc_type_)
+HostMem::HostMem(Size size_, int type_, AllocType alloc_type_)
     : flags(0), rows(0), cols(0), step(0), data(0), refcount(0), datastart(0), dataend(0), alloc_type(alloc_type_)
 {
     if (size_.height > 0 && size_.width > 0)
@@ -405,24 +528,24 @@ CudaMem::CudaMem(Size size_, int type_, AllocType alloc_type_)
 }
 
 inline
-CudaMem::CudaMem(InputArray arr, AllocType alloc_type_)
+HostMem::HostMem(InputArray arr, AllocType alloc_type_)
     : flags(0), rows(0), cols(0), step(0), data(0), refcount(0), datastart(0), dataend(0), alloc_type(alloc_type_)
 {
     arr.getMat().copyTo(*this);
 }
 
 inline
-CudaMem::~CudaMem()
+HostMem::~HostMem()
 {
     release();
 }
 
 inline
-CudaMem& CudaMem::operator =(const CudaMem& m)
+HostMem& HostMem::operator =(const HostMem& m)
 {
     if (this != &m)
     {
-        CudaMem temp(m);
+        HostMem temp(m);
         swap(temp);
     }
 
@@ -430,7 +553,7 @@ CudaMem& CudaMem::operator =(const CudaMem& m)
 }
 
 inline
-void CudaMem::swap(CudaMem& b)
+void HostMem::swap(HostMem& b)
 {
     std::swap(flags, b.flags);
     std::swap(rows, b.rows);
@@ -444,86 +567,88 @@ void CudaMem::swap(CudaMem& b)
 }
 
 inline
-CudaMem CudaMem::clone() const
+HostMem HostMem::clone() const
 {
-    CudaMem m(size(), type(), alloc_type);
+    HostMem m(size(), type(), alloc_type);
     createMatHeader().copyTo(m);
     return m;
 }
 
 inline
-void CudaMem::create(Size size_, int type_)
+void HostMem::create(Size size_, int type_)
 {
     create(size_.height, size_.width, type_);
 }
 
 inline
-Mat CudaMem::createMatHeader() const
+Mat HostMem::createMatHeader() const
 {
     return Mat(size(), type(), data, step);
 }
 
 inline
-bool CudaMem::isContinuous() const
+bool HostMem::isContinuous() const
 {
     return (flags & Mat::CONTINUOUS_FLAG) != 0;
 }
 
 inline
-size_t CudaMem::elemSize() const
+size_t HostMem::elemSize() const
 {
     return CV_ELEM_SIZE(flags);
 }
 
 inline
-size_t CudaMem::elemSize1() const
+size_t HostMem::elemSize1() const
 {
     return CV_ELEM_SIZE1(flags);
 }
 
 inline
-int CudaMem::type() const
+int HostMem::type() const
 {
     return CV_MAT_TYPE(flags);
 }
 
 inline
-int CudaMem::depth() const
+int HostMem::depth() const
 {
     return CV_MAT_DEPTH(flags);
 }
 
 inline
-int CudaMem::channels() const
+int HostMem::channels() const
 {
     return CV_MAT_CN(flags);
 }
 
 inline
-size_t CudaMem::step1() const
+size_t HostMem::step1() const
 {
     return step / elemSize1();
 }
 
 inline
-Size CudaMem::size() const
+Size HostMem::size() const
 {
     return Size(cols, rows);
 }
 
 inline
-bool CudaMem::empty() const
+bool HostMem::empty() const
 {
     return data == 0;
 }
 
-static inline
-void swap(CudaMem& a, CudaMem& b)
+inline
+void swap(HostMem& a, HostMem& b)
 {
     a.swap(b);
 }
 
-//////////////////////////////// Stream ///////////////////////////////
+//===================================================================================
+// Stream
+//===================================================================================
 
 inline
 Stream::Stream(const Ptr<Impl>& impl)
@@ -531,8 +656,25 @@ Stream::Stream(const Ptr<Impl>& impl)
 {
 }
 
-//////////////////////////////// Initialization & Info ////////////////////////
+//===================================================================================
+// Event
+//===================================================================================
 
+inline
+Event::Event(const Ptr<Impl>& impl)
+    : impl_(impl)
+{
+}
+
+//===================================================================================
+// Initialization & Info
+//===================================================================================
+
+// WARNING: unreachable code using Ninja
+#if defined _MSC_VER && _MSC_VER >= 1920
+#pragma warning(push)
+#pragma warning(disable: 4702)
+#endif
 inline
 bool TargetArchs::has(int major, int minor)
 {
@@ -550,6 +692,9 @@ DeviceInfo::DeviceInfo()
 {
     device_id_ = getDevice();
 }
+#if defined _MSC_VER && _MSC_VER >= 1920
+#pragma warning(pop)
+#endif
 
 inline
 DeviceInfo::DeviceInfo(int device_id)
@@ -558,6 +703,11 @@ DeviceInfo::DeviceInfo(int device_id)
     device_id_ = device_id;
 }
 
+// WARNING: unreachable code using Ninja
+#if defined _MSC_VER && _MSC_VER >= 1920
+#pragma warning(push)
+#pragma warning(disable: 4702)
+#endif
 inline
 int DeviceInfo::deviceID() const
 {
@@ -567,7 +717,7 @@ int DeviceInfo::deviceID() const
 inline
 size_t DeviceInfo::freeMemory() const
 {
-    size_t _totalMemory, _freeMemory;
+    size_t _totalMemory = 0, _freeMemory = 0;
     queryMemory(_totalMemory, _freeMemory);
     return _freeMemory;
 }
@@ -575,7 +725,7 @@ size_t DeviceInfo::freeMemory() const
 inline
 size_t DeviceInfo::totalMemory() const
 {
-    size_t _totalMemory, _freeMemory;
+    size_t _totalMemory = 0, _freeMemory = 0;
     queryMemory(_totalMemory, _freeMemory);
     return _totalMemory;
 }
@@ -586,20 +736,28 @@ bool DeviceInfo::supports(FeatureSet feature_set) const
     int version = majorVersion() * 10 + minorVersion();
     return version >= feature_set;
 }
+#if defined _MSC_VER && _MSC_VER >= 1920
+#pragma warning(pop)
+#endif
+
 
 }} // namespace cv { namespace cuda {
 
-//////////////////////////////// Mat ////////////////////////////////
+//===================================================================================
+// Mat
+//===================================================================================
 
 namespace cv {
 
 inline
 Mat::Mat(const cuda::GpuMat& m)
-    : flags(0), dims(0), rows(0), cols(0), data(0), refcount(0), datastart(0), dataend(0), datalimit(0), allocator(0), size(&rows)
+    : flags(0), dims(0), rows(0), cols(0), data(0), datastart(0), dataend(0), datalimit(0), allocator(0), u(0)
 {
     m.download(*this);
 }
 
 }
 
-#endif // __OPENCV_CORE_CUDAINL_HPP__
+//! @endcond
+
+#endif // OPENCV_CORE_CUDAINL_HPP
